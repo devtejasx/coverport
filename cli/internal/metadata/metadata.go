@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -72,12 +73,11 @@ func (e *ImageMetadataExtractor) ExtractGitMetadata(ctx context.Context, image s
 	// Parse the payload
 	var payload map[string]interface{}
 	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-		// Try base64 decoding first
-		cmd := exec.Command("base64", "-d")
-		cmd.Stdin = strings.NewReader(payloadStr)
-		decoded, err := cmd.Output()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode payload: %w", err)
+		// A DSSE envelope carries its payload base64-encoded, so this is the
+		// usual path rather than a fallback.
+		decoded, decodeErr := decodeBase64Payload(payloadStr)
+		if decodeErr != nil {
+			return nil, fmt.Errorf("failed to decode payload: %w", decodeErr)
 		}
 		if err := json.Unmarshal(decoded, &payload); err != nil {
 			return nil, fmt.Errorf("failed to parse decoded payload: %w", err)
@@ -163,6 +163,30 @@ func (e *ImageMetadataExtractor) ExtractGitMetadata(ctx context.Context, image s
 	}
 
 	return metadata, nil
+}
+
+// decodeBase64Payload decodes an attestation payload.
+//
+// This used to shell out to base64(1), which made metadata extraction depend on
+// a binary that need not be present in the runtime image and ran outside the
+// caller's context, so it could not be cancelled. The rest of the CLI already
+// decodes with encoding/base64.
+//
+// base64(1) ignores whitespace and accepts input with or without padding, so
+// both are still accepted here.
+func decodeBase64Payload(payload string) ([]byte, error) {
+	cleaned := strings.Map(func(r rune) rune {
+		switch r {
+		case ' ', '\t', '\n', '\r':
+			return -1
+		}
+		return r
+	}, payload)
+
+	if decoded, err := base64.StdEncoding.DecodeString(cleaned); err == nil {
+		return decoded, nil
+	}
+	return base64.RawStdEncoding.DecodeString(cleaned)
 }
 
 // extractPRNumber attempts to extract the PR number from annotations or branch name

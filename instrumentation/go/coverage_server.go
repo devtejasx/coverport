@@ -39,6 +39,15 @@ import (
 const (
 	DefaultPort = 53700 // Starting port for the coverage server
 	MaxRetries  = 50    // Maximum number of ports to try
+
+	// Offset and length of MetaFileHash inside the meta-file header written by
+	// coverage.WriteMeta. internal/coverage.MetaFileHeader lays out
+	// Magic [4]byte, Version uint32, TotalLength uint64, Entries uint64 ahead
+	// of it, so the hash starts at byte 24. go tool covdata pairs a
+	// covcounters file with a covmeta file by this hash alone, and the Go
+	// runtime names the files it writes to GOCOVERDIR the same way.
+	metaHashOffset = 24
+	metaHashLen    = 16
 )
 
 // metaHashOnce ensures the metadata hash is computed exactly once.
@@ -154,13 +163,17 @@ func ensureMetaHash() {
 			metaHash = "unknown"
 			return
 		}
-		data := buf.Bytes()
-		if len(data) >= 32 {
-			metaHash = fmt.Sprintf("%x", data[16:32])
-		} else {
-			metaHash = "unknown"
-		}
+		metaHash = metaHashFromHeader(buf.Bytes())
 	})
+}
+
+// metaHashFromHeader returns the MetaFileHash recorded in a meta-file header,
+// or "unknown" if the buffer is too short to hold one.
+func metaHashFromHeader(data []byte) string {
+	if len(data) < metaHashOffset+metaHashLen {
+		return "unknown"
+	}
+	return fmt.Sprintf("%x", data[metaHashOffset:metaHashOffset+metaHashLen])
 }
 
 // CoverageHandler collects coverage data and returns it via HTTP as JSON.

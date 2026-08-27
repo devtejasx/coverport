@@ -143,17 +143,18 @@ func (d *ImageDiscovery) DiscoverPodsByLabelSelector(ctx context.Context, namesp
 // normalizeImageRef normalizes an image reference for comparison
 // Example: quay.io/user/app:tag -> quay.io/user/app
 // Example: quay.io/user/app@sha256:abc -> quay.io/user/app
+// Example: registry.example.com:5000/app -> registry.example.com:5000/app
 func normalizeImageRef(image string) string {
-	// Remove tag
-	if idx := strings.LastIndex(image, ":"); idx != -1 {
-		// Check if this is a digest (contains @sha256:)
-		if !strings.Contains(image[idx:], "@") {
-			image = image[:idx]
-		}
+	// Remove digest first, so the colon inside "@sha256:..." is out of the way
+	// before the tag is looked for.
+	if idx := strings.Index(image, "@"); idx != -1 {
+		image = image[:idx]
 	}
 
-	// Remove digest
-	if idx := strings.Index(image, "@"); idx != -1 {
+	// Remove tag. A colon only separates a tag in the final path component;
+	// earlier than that it is the registry's port, and cutting there would
+	// leave the host on its own, comparing "registry:5000/app" as "registry".
+	if idx := strings.LastIndex(image, ":"); idx > strings.LastIndex(image, "/") {
 		image = image[:idx]
 	}
 

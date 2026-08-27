@@ -46,6 +46,34 @@ func TestNormalizeImageRef(t *testing.T) {
 			input:    "quay.io/org/service:v2.3.1",
 			expected: "quay.io/org/service",
 		},
+		{
+			// A colon before the last slash is a registry port, not a tag.
+			name:     "image with port and no tag",
+			input:    "registry.example.com:5000/app",
+			expected: "registry.example.com:5000/app",
+		},
+		{
+			// The OpenShift internal registry, which pods reference by service
+			// name and port. Discovery reads these straight off running pods.
+			name:     "openshift internal registry with no tag",
+			input:    "image-registry.openshift-image-registry.svc:5000/my-ns/my-app",
+			expected: "image-registry.openshift-image-registry.svc:5000/my-ns/my-app",
+		},
+		{
+			name:     "image with port and digest",
+			input:    "registry.example.com:5000/app@sha256:abc123",
+			expected: "registry.example.com:5000/app",
+		},
+		{
+			name:     "localhost registry with port and no tag",
+			input:    "localhost:5000/app",
+			expected: "localhost:5000/app",
+		},
+		{
+			name:     "bare name with no registry, tag or digest",
+			input:    "nginx",
+			expected: "nginx",
+		},
 	}
 
 	for _, tt := range tests {

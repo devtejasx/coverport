@@ -15,8 +15,12 @@ source = /app
 # Files are named: .coverage.<hostname>.<pid>.<random>
 parallel = True
 
-# Support multiprocessing (Gunicorn workers)
-concurrency = multiprocessing
+# Support multiprocessing (Gunicorn workers).
+# 'thread' has to be listed explicitly: naming any other concurrency library
+# turns off coverage.py's default thread measurement, and everything a
+# threaded worker, a background thread or a ThreadPoolExecutor runs would be
+# reported as unexecuted.
+concurrency = multiprocessing,thread
 
 # Omit coverage wrapper and installed packages
 omit =

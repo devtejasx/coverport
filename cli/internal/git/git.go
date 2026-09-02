@@ -6,6 +6,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strings"
 )
 
 // RepositoryCloner handles cloning git repositories
@@ -35,8 +37,40 @@ type CloneOptions struct {
 	Depth     int // Shallow clone depth (0 = full clone)
 }
 
+// commitSHAPattern matches an abbreviated or full git object name.
+var commitSHAPattern = regexp.MustCompile(`^[0-9a-fA-F]{4,64}$`)
+
+// validate rejects clone inputs that git would read as command-line options
+// rather than as data.
+//
+// RepoURL, CommitSHA and Branch come out of the container image's SLSA
+// attestation (see internal/metadata), so they are chosen by whoever built the
+// image, not by the operator running coverport. Passed straight through as
+// positional arguments, a commit_sha annotation of
+// "--upload-pack=<shell command>" turns "git fetch origin <sha>" into arbitrary
+// command execution on the machine running the CLI.
+func (o CloneOptions) validate() error {
+	if o.RepoURL == "" {
+		return fmt.Errorf("repository URL is empty")
+	}
+	if strings.HasPrefix(o.RepoURL, "-") {
+		return fmt.Errorf("refusing repository URL %q: a leading dash is parsed as a git option", o.RepoURL)
+	}
+	if o.CommitSHA != "" && !commitSHAPattern.MatchString(o.CommitSHA) {
+		return fmt.Errorf("refusing commit %q: expected a hexadecimal git object name", o.CommitSHA)
+	}
+	if strings.HasPrefix(o.Branch, "-") {
+		return fmt.Errorf("refusing branch %q: a leading dash is parsed as a git option", o.Branch)
+	}
+	return nil
+}
+
 // Clone clones a git repository at a specific commit
 func (c *RepositoryCloner) Clone(ctx context.Context, opts CloneOptions) error {
+	if err := opts.validate(); err != nil {
+		return fmt.Errorf("invalid clone options: %w", err)
+	}
+
 	fmt.Printf("Cloning repository: %s\n", opts.RepoURL)
 	fmt.Printf("   Commit: %s\n", opts.CommitSHA)
 	fmt.Printf("   Target: %s\n", opts.TargetDir)
@@ -67,7 +101,9 @@ func (c *RepositoryCloner) Clone(ctx context.Context, opts CloneOptions) error {
 		args = append(args, "--branch", opts.Branch)
 	}
 
-	args = append(args, opts.RepoURL, opts.TargetDir)
+	// The end-of-options marker keeps git from reading the URL as an option
+	// even if validate() is ever relaxed.
+	args = append(args, "--", opts.RepoURL, opts.TargetDir)
 
 	// Execute clone
 	cmd := exec.CommandContext(ctx, c.gitPath, args...)
@@ -85,13 +121,13 @@ func (c *RepositoryCloner) Clone(ctx context.Context, opts CloneOptions) error {
 		// First, we might need to fetch if this is a shallow clone
 		if opts.Depth > 0 {
 			fmt.Println("   Fetching commit (shallow clone)...")
-			fetchCmd := exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "fetch", "--depth=1", "origin", opts.CommitSHA)
+			fetchCmd := exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "fetch", "--depth=1", "origin", "--", opts.CommitSHA)
 			fetchCmd.Stdout = os.Stdout
 			fetchCmd.Stderr = os.Stderr
 			if err := fetchCmd.Run(); err != nil {
 				// If fetch fails, try without depth
 				fmt.Println("   Retrying fetch without depth limit...")
-				fetchCmd = exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "fetch", "origin", opts.CommitSHA)
+				fetchCmd = exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "fetch", "origin", "--", opts.CommitSHA)
 				fetchCmd.Stdout = os.Stdout
 				fetchCmd.Stderr = os.Stderr
 				if err := fetchCmd.Run(); err != nil {
@@ -100,7 +136,7 @@ func (c *RepositoryCloner) Clone(ctx context.Context, opts CloneOptions) error {
 			}
 		}
 
-		checkoutCmd := exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "checkout", opts.CommitSHA)
+		checkoutCmd := exec.CommandContext(ctx, c.gitPath, "-C", opts.TargetDir, "checkout", "--detach", opts.CommitSHA)
 		checkoutCmd.Stdout = os.Stdout
 		checkoutCmd.Stderr = os.Stderr
 

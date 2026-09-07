@@ -202,15 +202,15 @@ func isSystemNamespace(ns string) bool {
 		"kube-public",
 		"kube-node-lease",
 		"openshift",
-		"openshift-.*",
 		"default",
 	}
 
 	for _, sysNs := range systemNamespaces {
-		if strings.HasPrefix(ns, strings.TrimSuffix(sysNs, ".*")) {
+		if ns == sysNs {
 			return true
 		}
 	}
 
-	return false
+	// OpenShift keeps its own components in openshift-prefixed namespaces.
+	return strings.HasPrefix(ns, "openshift-")
 }

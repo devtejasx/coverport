@@ -171,6 +171,9 @@ func TestIsSystemNamespace(t *testing.T) {
 		{"default", "default", true},
 		{"user namespace", "my-namespace", false},
 		{"custom namespace", "test-env", false},
+		{"namespace named after default", "default-tenant", false},
+		{"namespace named after kube-system", "kube-system-tests", false},
+		{"namespace named after openshift", "openshiftless", false},
 	}
 
 	for _, tt := range tests {

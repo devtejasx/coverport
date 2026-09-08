@@ -32,8 +32,8 @@ graph TD
     O -->|Tekton / Konflux| P[Tekton pipeline tasks]
     O -->|GitHub Actions| Q{Collection pattern?}
 
-    Q -->|App in Kubernetes| R[Pattern A: port-forward to pod:9095]
-    Q -->|App running locally| S[Pattern B: --url localhost:9095]
+    Q -->|App in Kubernetes| R[Pattern A: port-forward to pod:53700]
+    Q -->|App running locally| S[Pattern B: --url localhost:53700]
     Q -->|Test runner output| T[Pattern C: client-side]
 
     N --> U{Where is the repo?}

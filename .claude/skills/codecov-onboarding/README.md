@@ -257,9 +257,9 @@ AI: I'll use the coverport-integration skill. Since your e2e tests
 You: The app runs locally via docker compose.
 
 AI: I'll use the --url pattern. The workflow will:
-    1. Start your instrumented app (port 9095 exposed)
+    1. Start your instrumented app (port 53700 exposed)
     2. Run your e2e tests
-    3. Use `podman run coverport-cli collect --url http://localhost:9095`
+    3. Use `podman run coverport-cli collect --url http://localhost:53700/coverage`
     4. Use `podman run coverport-cli process` to upload to Codecov
     ...
 ```

@@ -9,13 +9,19 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"time"
 )
+
+// downloadTimeout bounds the codecov CLI download. http.DefaultClient has no
+// timeout at all, so an unresponsive host would hang the upload forever.
+const downloadTimeout = 5 * time.Minute
 
 // CodecovUploader handles uploading coverage to Codecov
 type CodecovUploader struct {
 	token         string
 	codecovPath   string
 	downloadedCLI bool
+	tempDir       string
 }
 
 // CodecovOptions contains options for uploading to Codecov
@@ -74,17 +80,14 @@ func (u *CodecovUploader) ensureCodecovCLI(ctx context.Context) error {
 		return fmt.Errorf("unsupported OS: %s", runtime.GOOS)
 	}
 
-	// Download to temp directory
-	tempDir := os.TempDir()
-	codecovPath := filepath.Join(tempDir, "codecov")
-
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "GET", downloadURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create download request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: downloadTimeout}
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to download codecov CLI: %w", err)
 	}
@@ -94,22 +97,57 @@ func (u *CodecovUploader) ensureCodecovCLI(ctx context.Context) error {
 		return fmt.Errorf("failed to download codecov CLI: status %d", resp.StatusCode)
 	}
 
-	// Write to file
-	out, err := os.OpenFile(codecovPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	// Write to a file in a directory only this process can reach
+	out, err := u.createCLIFile()
 	if err != nil {
-		return fmt.Errorf("failed to create codecov file: %w", err)
+		return err
 	}
 	defer out.Close()
 
 	if _, err := io.Copy(out, resp.Body); err != nil {
+		u.discardTempDir()
 		return fmt.Errorf("failed to save codecov CLI: %w", err)
 	}
 
-	u.codecovPath = codecovPath
+	u.codecovPath = out.Name()
 	u.downloadedCLI = true
 
-	fmt.Printf("Codecov CLI downloaded to: %s\n", codecovPath)
+	fmt.Printf("Codecov CLI downloaded to: %s\n", u.codecovPath)
 	return nil
+}
+
+// createCLIFile creates the file the codecov CLI is downloaded into.
+//
+// The download used to land on os.TempDir()/codecov: a fixed path in a
+// directory every user on the host can write to, opened with O_TRUNC and
+// without O_EXCL. Anyone could pre-create it -- as a symlink, so the download
+// overwrites a file of their choosing, or as a file they own, so they can
+// rewrite its contents between the download and the exec of a binary this tool
+// then runs as the invoking user. The download now goes into a fresh 0700
+// directory under a name nobody else can predict, and refuses to reuse an
+// existing file.
+func (u *CodecovUploader) createCLIFile() (*os.File, error) {
+	dir, err := os.MkdirTemp("", "coverport-codecov-")
+	if err != nil {
+		return nil, fmt.Errorf("failed to create codecov download directory: %w", err)
+	}
+
+	f, err := os.OpenFile(filepath.Join(dir, "codecov"), os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0700)
+	if err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("failed to create codecov file: %w", err)
+	}
+
+	u.tempDir = dir
+	return f, nil
+}
+
+// discardTempDir removes the private download directory, if one was created.
+func (u *CodecovUploader) discardTempDir() {
+	if u.tempDir != "" {
+		_ = os.RemoveAll(u.tempDir)
+		u.tempDir = ""
+	}
 }
 
 // Upload uploads coverage data to Codecov
@@ -194,7 +232,8 @@ func (u *CodecovUploader) Upload(ctx context.Context, opts CodecovOptions) error
 
 // Cleanup removes the downloaded codecov CLI if it was downloaded
 func (u *CodecovUploader) Cleanup() {
-	if u.downloadedCLI && u.codecovPath != "" {
-		os.Remove(u.codecovPath)
+	if u.downloadedCLI {
+		u.discardTempDir()
+		u.codecovPath = ""
 	}
 }

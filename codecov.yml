@@ -24,10 +24,15 @@ ignore:
   - "docs/**"
   - "examples/**"
   - ".github/**"
+  - "test/fixtures/**"
+  - "test/e2e/**"
   - "**/*.yml"
   - "**/*.yaml"
   - "**/*.toml"
   - "**/*.md"
+  - ".agents/**"
+  - ".cursor/**"
+  - "skills/**"
 
 flags:
   cli-tests:
@@ -37,6 +42,8 @@ flags:
   instrumentation-tests:
     paths:
       - instrumentation/go/
+    carryforward: true
+  e2e-tests:
     carryforward: true
 
 comment:

@@ -1,6 +1,6 @@
 ---
 name: coverport-integration
-description: Integrate coverport into repositories to enable e2e test coverage collection and upload to Codecov. Supports Go, Python, and Node.js applications with Tekton/Konflux pipelines and GitHub Actions (using coverport CLI container via podman). Use this skill when users ask to integrate coverport, add e2e coverage tracking, or set up coverage instrumentation.
+description: Integrate coverport into repositories to enable e2e test coverage collection and upload to Codecov. Supports Go, Python, Node.js, and Rust applications with Tekton/Konflux pipelines and GitHub Actions (using coverport CLI container via podman). Use this skill when users ask to integrate coverport, add e2e coverage tracking, or set up coverage instrumentation.
 ---
 
 # Coverport Integration Skill
@@ -10,28 +10,33 @@ This skill automates the integration of coverport into repositories for e2e test
 ## What is Coverport?
 
 Coverport is a tool that enables e2e test coverage collection by:
-1. Building instrumented container images (Go with `-cover`, Python with coverage wrapper, Node.js with V8 inspector)
+1. Building instrumented container images (Go with `-cover`, Python with coverage wrapper, Node.js with V8 inspector, Rust with `-C instrument-coverage`)
 2. Collecting coverage data from running containers during e2e tests — via HTTP endpoint or from test runner output
 3. Processing and uploading the coverage data to Codecov with appropriate flags
 
 The coverport CLI is available as a container image that includes all dependencies (oras, cosign, git, language-specific tools):
 ```
-quay.io/konflux-ci/konflux-devprod/coverport-cli
+quay.io/konflux-ci/konflux-devprod/coverport-cli:<tag>
 ```
+
+> **IMPORTANT — Pin the image tag**: Never use `:latest` or an untagged image in generated CI
+> workflows. Always resolve the current latest tag at onboarding time (see Step 0) and pin to it.
+> This prevents breaking the onboarded application's CI if coverport introduces breaking changes later.
 
 ## When to Use This Skill
 
 Use this skill when the user:
 - Asks to integrate coverport into their repository
 - Wants to add e2e test coverage tracking
-- Needs to set up coverage instrumentation for Go, Python, or Node.js projects
+- Needs to set up coverage instrumentation for Go, Python, Node.js, or Rust projects
 - Mentions integrating coverage collection for Tekton/Konflux pipelines
 - Wants to collect e2e coverage in GitHub Actions using the coverport CLI container
+- Mentions LLVM coverage, profraw, or `instrument-coverage` for Rust
 
 ## Prerequisites
 
 Before using this skill, verify the repository has:
-- Codebase with a Dockerfile (Go, Python, or Node.js)
+- Codebase with a Dockerfile (Go, Python, Node.js, or Rust)
 - One of the following CI/CD setups:
   - Tekton pipelines (typically in `.tekton/` directory) with an E2E test pipeline (typically in `integration-tests/pipelines/`)
   - GitHub Actions workflows (in `.github/workflows/`)
@@ -43,13 +48,30 @@ Before using this skill, verify the repository has:
 
 Before starting, run these checks to understand the repository structure:
 
-1. **Detect project language and entry point:**
+1. **Resolve the current coverport-cli image tag:**
+   ```bash
+   # Fetch the latest git commit SHA tag from Quay (no auth needed for public repos)
+   COVERPORT_TAG=$(curl -s "https://quay.io/api/v1/repository/konflux-ci/konflux-devprod%2Fcoverport-cli/tag/?onlyActiveTags=true&limit=50" \
+     | jq -r '
+       (.tags[] | select(.name == "latest") | .manifest_digest) as $digest |
+       .tags[] | select(.manifest_digest == $digest and (.name | test("^[0-9a-f]{40}$"))) | .name
+     ' | head -1)
+   echo "Pinning to: quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG}"
+   ```
+   Use this tag in all generated CI YAML instead of `:latest` or untagged references.
+   If the API is unreachable or `jq` is not available, fall back to using the `latest` tag with a comment noting it should be pinned.
+
+2. **Detect project language and entry point:**
    ```bash
    # Go projects
    find . -name "main.go" -not -path "*/vendor/*" -not -path "*/test/*"
    # Python projects
    find . -name "requirements.txt" -o -name "setup.py" -o -name "pyproject.toml" | head -5
    ls *.py Dockerfile Containerfile 2>/dev/null
+   # Rust projects
+   find . -name "Cargo.toml" -not -path "*/target/*" | head -10
+   grep -r "\[\[bin\]\]" Cargo.toml */Cargo.toml 2>/dev/null
+   ls src/main.rs 2>/dev/null
    ```
 
 2. **Check current Dockerfile build command:**
@@ -58,6 +80,8 @@ Before starting, run these checks to understand the repository structure:
    grep -A5 "go build" Dockerfile Containerfile 2>/dev/null
    # Python projects
    grep -A5 "pip install\|ENTRYPOINT\|CMD" Dockerfile Containerfile 2>/dev/null
+   # Rust projects
+   grep -A5 "cargo build" Dockerfile Containerfile 2>/dev/null
    ```
 
 3. **List Tekton pipelines:**
@@ -68,7 +92,7 @@ Before starting, run these checks to understand the repository structure:
 
 4. **Check for existing coverage setup:**
    ```bash
-   grep -r "ENABLE_COVERAGE\|instrumented\|coverport" . --exclude-dir=vendor --exclude-dir=.git
+   grep -r "ENABLE_COVERAGE\|instrumented\|coverport\|instrument-coverage\|coverage-server" . --exclude-dir=vendor --exclude-dir=target --exclude-dir=.git
    ```
 
 5. **Check if e2e test suite rebuilds the container image:**
@@ -89,14 +113,21 @@ Before starting, run these checks to understand the repository structure:
    ```
    This is critical for deciding which pipeline changes are needed (see Decision Point below).
 
-7. **Check if Tekton e2e tests run pytest directly (Python projects):**
+7. **Determine Python e2e test style (Python projects only):**
    ```bash
+   # Does the pipeline run pytest against cloned source?
    grep -A5 "pytest\|python.*run_tests" integration-tests/pipelines/*.yaml 2>/dev/null
+   # Does the pipeline deploy or test a container image?
+   grep -rl "kind\|kubectl\|helm\|deploy\|instrumented-container" integration-tests/pipelines/*.yaml .github/workflows/ 2>/dev/null
    ```
-   If the Tekton e2e pipeline clones the repo, installs dependencies, and runs pytest directly
-   against the source code (rather than deploying and testing the container image), use
-   **Pattern D: pytest-cov** instead of container instrumentation. This is simpler and gives
-   the same coverage data.
+   Two distinct Python paths — choose based on what the e2e tests actually exercise:
+   - **Pattern D (pytest-cov)**: Pipeline clones the repo, installs dependencies, and runs
+     `pytest` directly against **source code**. The container image is NOT deployed or tested.
+     No container instrumentation needed.
+   - **Container instrumentation (Steps 3-5 Python)**: E2e tests **deploy and exercise the
+     container image** (K8s/Kind, `podman run`, etc.). Vendor the files from
+     `instrumentation/python/` and collect via Pattern A or B on port **53700**.
+   **Do NOT route Python container deployments to Pattern D.**
 
 This helps identify potential conflicts or existing coverage infrastructure before making changes.
 
@@ -120,10 +151,12 @@ Analyze the repository structure to understand what needs to be modified:
 
 Before making changes, ask the user:
 
-1. **Which binaries to instrument?** - If the Dockerfile builds multiple binaries, ask which ones run during e2e tests
-2. **Tenant namespace** - Confirm the namespace where their build and integration pipelines run (check `.tekton/*-push.yaml` for the `namespace` field)
-3. **Secret name** - Confirm they want to use `coverport-secrets` or specify a different name
-4. **OCI storage** - Confirm where coverage data should be stored (the quay.io repository for test artifacts)
+1. **Which binaries to instrument?** (Go/Rust) - If the Dockerfile builds multiple binaries, ask which ones run during e2e tests
+2. **Python: container vs source tests?** (Python) - Do e2e tests deploy the container image, or run pytest directly against source? Container deployment → Steps 3-5 (Python); pytest against source → Pattern D
+3. **Python: WSGI entry point** (Python container path) - Confirm the Gunicorn module path (e.g. `app:app`) and container `WORKDIR` (typically `/app`, must match `.coveragerc` `source`)
+4. **Tenant namespace** - Confirm the namespace where their build and integration pipelines run (check `.tekton/*-push.yaml` for the `namespace` field)
+5. **Secret name** - Confirm they want to use `coverport-secrets` or specify a different name
+6. **OCI storage** - Confirm where coverage data should be stored (the quay.io repository for test artifacts)
 
 ### Decision Point: Tekton vs GitHub Actions
 
@@ -131,16 +164,20 @@ Before making changes, ask the user:
 
 | E2E tests run in... | Test style | Apply these steps |
 |---|---|---|
-| **Tekton integration pipelines only** (`integration-tests/pipelines/`) | Tests deploy/use the container image | Steps 3-6, E2E pipeline update, Step 8 (Tekton PR) |
-| **Tekton integration pipelines only** (`integration-tests/pipelines/`) | Tests run pytest directly against source (Python) | **Pattern D: pytest-cov** — no container instrumentation needed |
-| **GitHub Actions only** (no `integration-tests/pipelines/`) | Tests deploy/use the container image | Steps 3-5.5, Step 7 (GitHub Actions) — **skip Steps 6 and 8** |
-| **Both Tekton and GitHub Actions** | Tests deploy/use the container image | All steps |
+| **Tekton integration pipelines only** (`integration-tests/pipelines/`) | Go/Rust: tests deploy/use the container image | Steps 3-6, E2E pipeline update, Step 8 (Tekton PR) |
+| **Tekton integration pipelines only** (`integration-tests/pipelines/`) | Python: tests run pytest directly against source | **Pattern D: pytest-cov** — no container instrumentation needed |
+| **Tekton integration pipelines only** (`integration-tests/pipelines/`) | Python: app deployed as container (Flask/Django/FastAPI + Gunicorn) | Steps 3-5 (Python), **Step 6 (Python)**, E2E pipeline update, **Step 8 (Python PR)** — **not** Pattern D |
+| **GitHub Actions only** (no `integration-tests/pipelines/`) | Go/Rust: tests deploy/use the container image | Steps 3-5.5, Step 7 (GitHub Actions) — **skip Steps 6 and 8** |
+| **GitHub Actions only** | Python: app deployed as container (Kind, `podman run`, etc.) | Steps 3-5 (Python), Step 7 **Pattern A (Kind)** preferred; Pattern B only for local `podman run` |
+| **Both Tekton and GitHub Actions** | Tests deploy/use the container image | All applicable steps (language-specific: Go/Rust use Step 6 `ENABLE_COVERAGE`; Python uses Step 6 `TARGET_STAGE`) |
 
 **Key rule: Do NOT modify Tekton push/PR pipelines (Steps 6, 8) if the repository does not have a Tekton e2e integration pipeline.** Building an instrumented image in Tekton is pointless if nothing in Tekton consumes it. The instrumented build happens locally (e.g., via `make` with `ENABLE_COVERAGE=true`) in the GitHub Actions workflow instead.
 
-**Key rule: If Tekton e2e tests run pytest directly against source code** (clone repo → install deps → run pytest), container instrumentation is unnecessary. Use Pattern D (pytest-cov) instead — it's simpler and gives the same coverage data.
+**Key rule: Pattern D is only for pytest against cloned source.** If Python e2e tests deploy or hit a container image (even when written in pytest), use container instrumentation (Steps 3-5 Python) + Pattern A/B — not Pattern D.
 
-### Step 3: Add Coverport as a Go Module Dependency
+### Step 3: Add Coverage Dependency
+
+#### Go
 
 Add coverport to your Go module dependencies:
 
@@ -155,7 +192,49 @@ This will:
 
 **Important**: Always run `go mod tidy` after `go get`. The `go get` command adds the dependency as `// indirect`, but since `coverage_init.go` imports it directly (even behind a build tag), `go mod tidy` correctly reclassifies it as a direct dependency. Many CI systems verify that `go mod tidy` produces no diff.
 
-### Step 4: Create coverage_init.go File
+#### Rust
+
+Add the `coverage-server` crate as an optional dependency behind a Cargo feature flag:
+
+```toml
+[features]
+coverage = ["dep:coverage-server"]
+
+[dependencies]
+coverage-server = { git = "https://github.com/konflux-ci/coverport.git", subdirectory = "instrumentation/rust", optional = true }
+```
+
+**Important**:
+- The `optional = true` ensures coverage-server is only compiled when `--features coverage` is passed
+- No additional dependencies (like tokio) are needed — the coverage server brings its own runtime
+- The crate is pulled from the coverport monorepo using Cargo's `subdirectory` parameter
+
+#### Python
+
+Copy the four instrumentation files from `instrumentation/python/` in the coverport monorepo
+into your application repository. See [instrumentation/python/README.md](../../../instrumentation/python/README.md)
+for file descriptions, Dockerfile example, and local validation steps.
+
+```
+instrumentation/python/coverage_server.py  → server/coverage_server.py
+instrumentation/python/sitecustomize.py    → server/sitecustomize.py
+instrumentation/python/.coveragerc         → server/.coveragerc
+instrumentation/python/gunicorn_coverage.py → server/gunicorn_coverage.py
+```
+
+Adjust the destination directory (`server/` above) to match your project layout. The
+Dockerfile in Step 5 must copy from these paths.
+
+**Important**:
+- No `pip install coverport` or Go-module equivalent — vendor these files directly
+- Ensure `coverage` and `gunicorn` are installed in the instrumented image (add to
+  `requirements.txt` or install in the Dockerfile test stage)
+- Update `source = /app` in `.coveragerc` if your container `WORKDIR` differs from `/app`
+- See [instrumentation/python/README.md](../../../instrumentation/python/README.md) for Dockerfile and validation details
+
+### Step 4: Add Coverage Initialization Code
+
+#### Go
 
 Create a new file `coverage_init.go` in the root of your Go module (same directory as `main.go` or where the `package main` is):
 
@@ -177,20 +256,45 @@ import _ "github.com/konflux-ci/coverport/instrumentation/go" // starts coverage
 - This file should be at the root of your Go module (where `main.go` is, or where the main package is)
 - Always run `go mod tidy` after this step. The coverport instrumentation dependency was previously fetched as indirect, and the new blank import makes it a direct dependency.
 
-### Step 5: Modify the Dockerfile
+#### Rust
 
-Add coverage instrumentation support:
+Add two lines to the application's `main()` function:
+
+```rust
+fn main() {
+    #[cfg(feature = "coverage")]
+    let _coverage = coverage_server::start_coverage_server_standalone(53700);
+
+    // ... rest of the application, completely unchanged ...
+}
+```
+
+**Important**:
+- The `#[cfg(feature = "coverage")]` attribute ensures this code is only compiled when the feature is enabled
+- `start_coverage_server_standalone(53700)` spawns the server on its own background thread with its own tokio runtime — no interference with the application's runtime
+- The port (53700) can be overridden at runtime via the `COVERAGE_PORT` environment variable
+- Works with any Rust application — any async runtime (tokio, async-std, actix-rt) or synchronous apps
+
+#### Python
+
+**No application code changes are required.**
+
+Unlike Go (`coverage_init.go`) or Rust (lines in `main()`), Python container instrumentation
+is entirely file-based: `sitecustomize.py` auto-starts coverage in every process, and
+`gunicorn_coverage.py` saves worker data on exit. Skip this step for Python.
+
+### Step 5: Modify the Dockerfile
 
 **Add build argument** (near the top after FROM):
 ```dockerfile
-# Build arguments
 ARG ENABLE_COVERAGE=false
 ```
+
+#### Go
 
 **Modify the build command** to conditionally build with coverage tags:
 
 ```dockerfile
-# Build with or without coverage instrumentation
 RUN if [ "$ENABLE_COVERAGE" = "true" ]; then \
         echo "Building with coverage instrumentation..."; \
         CGO_ENABLED=0 go build -cover -covermode=atomic -tags=coverage -o <binary-name> .; \
@@ -208,15 +312,88 @@ RUN if [ "$ENABLE_COVERAGE" = "true" ]; then \
 - Keep other binaries without instrumentation
 - No need to download external files - coverport is now a Go module dependency
 
+#### Rust
+
+**Modify the build command** to conditionally build with coverage:
+
+```dockerfile
+ARG ENABLE_COVERAGE
+
+RUN if [ "$ENABLE_COVERAGE" = "true" ]; then \
+        echo "Building with coverage instrumentation"; \
+        rustup component add llvm-tools-preview; \
+        RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE=/dev/null \
+        cargo build --release --features coverage; \
+    else \
+        echo "Building without coverage (production)"; \
+        cargo build --release; \
+    fi
+```
+
+**Important — Rust-specific details**:
+- `RUSTFLAGS="-C instrument-coverage"` tells the compiler to insert LLVM profiling counters
+- `--features coverage` activates the `coverage-server` optional dependency
+- `LLVM_PROFILE_FILE=/dev/null` suppresses stray `.profraw` files generated during the build
+- Without `-C instrument-coverage`, the LLVM FFI symbols won't be present and the build will fail with linker errors if `--features coverage` is set
+- Without `--features coverage`, the coverage-server dependency is not included at all — clean production binary
+
+#### Python
+
+Use a multi-stage Dockerfile to keep production images unchanged. The instrumented
+`test` stage installs `sitecustomize.py` into site-packages, sets coverage environment
+variables, and wraps the app CMD with `coverage_server.py`.
+
+- **Local / GitHub Actions**: `podman build --target test`
+- **Tekton (buildah-oci-ta)**: set `TARGET_STAGE=test` on the instrumented image build task (Step 6 Python) — do **not** use `ENABLE_COVERAGE=true` alone; Python has no conditional compile step for that arg
+
+```dockerfile
+# ... normal build stages (install app deps, COPY application code) ...
+
+FROM base AS production
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "-w", "2", "app:app"]
+
+FROM base AS test
+RUN pip install --no-cache-dir gunicorn coverage
+COPY server/sitecustomize.py /tmp/sitecustomize.py
+RUN SITE_PACKAGES=$(python -c "import site; print(site.getsitepackages()[0])") && \
+    cp /tmp/sitecustomize.py "$SITE_PACKAGES/sitecustomize.py"
+COPY server/.coveragerc /app/.coveragerc
+COPY server/gunicorn_coverage.py /opt/gunicorn_coverage.py
+COPY server/coverage_server.py /opt/coverage_server.py
+ENV COVERAGE_PROCESS_START=/app/.coveragerc
+ENV COVERAGE_DATA_DIR=/dev/shm
+ENV TMPDIR=/dev/shm
+EXPOSE 8080 53700
+CMD ["python", "/opt/coverage_server.py", "-m", "gunicorn", \
+     "-c", "/opt/gunicorn_coverage.py", "-b", "0.0.0.0:8080", "-w", "1", "app:app"]
+```
+
+Build the instrumented image:
+
+```bash
+podman build --target test -t myapp:instrumented .
+```
+
+**Important — Python-specific details**:
+- Replace `app:app` with your WSGI entry point
+- `sitecustomize.py` must be installed into **site-packages** so every Gunicorn worker loads it
+- `COVERAGE_DATA_DIR=/dev/shm` and `TMPDIR=/dev/shm` are required for `readOnlyRootFilesystem` pods
+- `coverage_server.py` exposes the HTTP coverage endpoint on port **53700** by default (`COVERAGE_PORT` env var overrides)
+- `-w 1` is recommended for initial setup; increase workers once coverage collection is verified
+- See [instrumentation/python/README.md](../../../instrumentation/python/README.md) for local podman validation and `coverport collect` examples
+
 ### Step 5.5: Validate Dockerfile Changes Locally
 
 **IMPORTANT**: Before proceeding to pipeline changes, validate the Dockerfile modifications work correctly using podman or docker:
 
 ```bash
-# Build instrumented image
+# Go/Rust: instrumented build via ENABLE_COVERAGE build arg
 podman build --build-arg ENABLE_COVERAGE=true -t test-instrumented -f Dockerfile .
 
-# Build production image (without coverage)
+# Python: instrumented build via test stage target
+podman build --target test -t test-instrumented -f Dockerfile .
+
+# Production image (without coverage)
 podman build -t test-production -f Dockerfile .
 
 # Verify both images built successfully
@@ -224,17 +401,33 @@ podman images | grep test-
 ```
 
 **Expected output in instrumented build:**
-- "Building with coverage instrumentation..."
+- Go/Rust: "Building with coverage instrumentation..."
+- Python: image builds successfully; container logs show `[coverage-wrapper] HTTP server listening on port 53700`
 
 **Expected output in production build:**
-- "Building production binary..."
+- Go: "Building production binary..."
+- Python: production stage CMD runs plain Gunicorn without coverage wrapper
+
+**Python validation (after instrumented build):**
+```bash
+# Default port is 53700; use the same value as COVERAGE_PORT if your image overrides it
+COVERAGE_PORT=53700
+podman run --rm -d --name py-cov-test -p 8080:8080 -p ${COVERAGE_PORT}:${COVERAGE_PORT} test-instrumented
+curl -s "http://localhost:${COVERAGE_PORT}/health"    # expect coverage_enabled: true
+curl -s http://localhost:8080/                        # hit app endpoints to generate coverage
+curl -s "http://localhost:${COVERAGE_PORT}/coverage/save"
+curl -s "http://localhost:${COVERAGE_PORT}/coverage"  # expect non-empty coverage_data
+podman stop py-cov-test
+```
 
 **If builds fail:**
 - Stop and fix the Dockerfile before proceeding
 - See Troubleshooting section for common issues
-- Ensure `coverage_init.go` exists in the correct location
-- Verify Go module dependencies were downloaded (check `go.mod` and `go.sum`)
-- Check that the build tags syntax is correct in `coverage_init.go`
+- Go: ensure `coverage_init.go` exists in the correct location
+- Go: verify Go module dependencies were downloaded (check `go.mod` and `go.sum`)
+- Go: check that the build tags syntax is correct in `coverage_init.go`
+- Python: verify all four instrumentation files were copied and `sitecustomize.py` is in site-packages
+- Python: confirm `gunicorn` and `coverage` packages are installed in the instrumented image
 
 **Why this validation matters:**
 - Catches Dockerfile syntax errors immediately
@@ -305,6 +498,64 @@ Find the location after `prefetch-dependencies` task and add:
 - `BUILD_ARGS` includes `ENABLE_COVERAGE=true`
 - Do NOT add a `build-instrumented-image-index` task - the instrumented image is single-platform only
 
+#### Python (Tekton push pipeline)
+
+For Python container apps, the instrumented image is the `test` Dockerfile stage — not a
+`ENABLE_COVERAGE` conditional build. Add the same `build-instrumented-image` task as above,
+but use `TARGET_STAGE` instead of `ENABLE_COVERAGE=true`:
+
+```yaml
+- name: build-instrumented-image
+  params:
+  - name: IMAGE
+    value: $(params.output-image).instrumented
+  - name: DOCKERFILE
+    value: $(params.dockerfile)
+  - name: CONTEXT
+    value: $(params.path-context)
+  - name: TARGET_STAGE
+    value: test
+  - name: HERMETIC
+    value: $(params.hermetic)
+  - name: PREFETCH_INPUT
+    value: $(params.prefetch-input)
+  - name: IMAGE_EXPIRES_AFTER
+    value: $(params.image-expires-after)
+  - name: COMMIT_SHA
+    value: $(tasks.clone-repository.results.commit)
+  - name: BUILD_ARGS
+    value:
+    - $(params.build-args[*])
+  - name: BUILD_ARGS_FILE
+    value: $(params.build-args-file)
+  - name: SOURCE_ARTIFACT
+    value: $(tasks.prefetch-dependencies.results.SOURCE_ARTIFACT)
+  - name: CACHI2_ARTIFACT
+    value: $(tasks.prefetch-dependencies.results.CACHI2_ARTIFACT)
+  runAfter:
+  - prefetch-dependencies
+  taskRef:
+    params:
+    - name: name
+      value: buildah-oci-ta
+    - name: bundle
+      value: quay.io/konflux-ci/tekton-catalog/task-buildah-oci-ta:0.7@sha256:b54509f5f695c0c89de4587a403099a26da5cdc3707037edd4b7cf4342b63edd
+    - name: kind
+      value: task
+    resolver: bundles
+  when:
+  - input: $(tasks.init.results.build)
+    operator: in
+    values:
+    - "true"
+```
+
+**Python Tekton notes:**
+- `TARGET_STAGE=test` maps to `podman build --target test` (buildah-oci-ta parameter)
+- The `test` stage name must match the Dockerfile stage defined in Step 5 (Python)
+- Do not add `ENABLE_COVERAGE=true` to `BUILD_ARGS` for Python — it has no effect unless you
+  add custom Dockerfile logic to interpret it
+
 ### Step 5: Update E2E Test Pipeline
 
 > **Skip this step if e2e tests run only in GitHub Actions.** This step applies only when there is a Tekton integration test pipeline in `integration-tests/pipelines/`.
@@ -360,6 +611,9 @@ For tests that deploy/run container images, find parameters that reference image
       value: e2e-tests
     - name: credentials-secret-name
       value: "coverport-secrets"  # Or user-specified name
+    # For Rust projects, add:
+    # - name: coverage-format
+    #   value: rust
   taskRef:
     resolver: git
     params:
@@ -370,6 +624,8 @@ For tests that deploy/run container images, find parameters that reference image
       - name: pathInRepo
         value: tasks/coverport-coverage/0.1/coverport-coverage.yaml
 ```
+
+**Rust-specific Tekton note**: For Rust projects, add the `coverage-format: rust` parameter to the coverage collection task. This tells coverport to process the collected profraw data using `llvm-profdata` and `llvm-cov` instead of the default Go profile format. The Tekton pipeline YAML is otherwise identical to Go — only this one parameter differs.
 
 ### Step 8: Update Tekton PR Pipeline (Pull Request Pipeline)
 
@@ -403,12 +659,29 @@ Find the `build-images` task (or equivalent) and add `ENABLE_COVERAGE=true` to i
   # ... rest of the task ...
 ```
 
-**Key points**:
+**Key points** (Go/Rust):
 - **With the Go module approach, hermetic builds are now supported!**
 - Enable `hermetic: "true"` and `prefetch-input` for secure, reproducible builds
 - Add `ENABLE_COVERAGE=true` to the regular build task in PR pipeline
 - This enables coverage collection for PR builds which can be used for PR-level testing
 - No need to create a separate instrumented image task in PR pipeline - just modify the existing build task
+
+**C. Python PR builds (Step 8 Python):**
+
+For Python container apps, set `TARGET_STAGE=test` on the PR `build-images` task instead of
+`ENABLE_COVERAGE=true`:
+
+```yaml
+- name: build-images
+  params:
+  # ... other params ...
+  - name: TARGET_STAGE
+    value: test
+```
+
+If the PR pipeline must still produce a production image for merging, keep the default
+production build as-is and add a separate instrumented build task (same as Step 6 Python)
+that tags with `.instrumented`.
 
 ### Step 7: Update GitHub Actions
 
@@ -449,9 +722,9 @@ use the coverport CLI container via podman to collect and upload e2e
 coverage. The container image includes all dependencies (oras, cosign,
 git, Go, etc.), so nothing needs to be installed separately.
 
-**Container image:**
+**Container image (use the tag resolved in Step 0):**
 ```
-quay.io/konflux-ci/konflux-devprod/coverport-cli
+quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG}
 ```
 
 There are three patterns depending on where the instrumented app runs
@@ -481,7 +754,7 @@ kubeconfig access to the cluster.
       -v /tmp/kubeconfig:/kubeconfig:ro \
       -v $PWD/coverage-output:/workspace/coverage-output \
       -e KUBECONFIG=/kubeconfig \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       collect \
         --namespace=${{ env.TEST_NAMESPACE }} \
         --label-selector=${{ env.LABEL_SELECTOR }} \
@@ -510,7 +783,7 @@ kubeconfig access to the cluster.
       -v /tmp/kubeconfig:/kubeconfig:ro \
       -v $PWD/coverage-output:/workspace/coverage-output \
       -e KUBECONFIG=/kubeconfig \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       collect \
         --images=${{ env.INSTRUMENTED_IMAGE }} \
         --namespace=${{ env.TEST_NAMESPACE }} \
@@ -522,7 +795,7 @@ kubeconfig access to the cluster.
     # Process and upload to Codecov
     podman run --rm \
       -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       process \
         --artifact-ref=${{ env.COVERAGE_ARTIFACT_REF }} \
         --image=${{ env.INSTRUMENTED_IMAGE }} \
@@ -531,26 +804,54 @@ kubeconfig access to the cluster.
 
 **Key points for Kubernetes collection:**
 - `--network host` is required so coverport can reach the Kind/k8s API
-- The coverport CLI collects coverage via port-forward to the pod's
-  coverage HTTP endpoint (port 9095 by default)
-- The `collect` command automatically generates a `coverage.out` text
-  profile from the binary Go coverage data
-- You can upload directly using `codecov/codecov-action` with the
-  generated `coverage.out` file (simpler, supports OIDC), or use
-  coverport's `process` command for OCI-based workflows
+- The coverport CLI port-forwards to the pod's coverage HTTP endpoint (default **53700** for
+  Go, Python, and Rust instrumentation; CLI also tries **9095** as fallback when `--port` is omitted)
+- Go: `collect` generates a `coverage.out` text profile from binary coverage data
+- Python (K8s path only): `collect` checks `/health`, triggers `/coverage/save`, fetches
+  `/coverage`, then **execs into the pod** to run `coverage xml` → `coverage.xml` in the
+  output directory — no separate `process` step needed
+- Upload Go: `coverage-output/.../coverage.out` via codecov-action or `process`
+- Upload Python: `coverage-output/<test-name>/coverage.xml` via codecov-action
+- You can also use coverport's `process` command for OCI-based workflows (Go path)
+
+##### Pattern A (Python): Upload after K8s collect
+
+When collecting Python coverage from Kind/Kubernetes (not `--url`), upload the XML file
+generated during `collect`:
+
+```yaml
+- name: Upload e2e coverage to Codecov
+  if: always()
+  uses: codecov/codecov-action@v6
+  with:
+    use_oidc: true
+    flags: e2e-tests
+    files: coverage-output/e2e-tests/coverage.xml
+    fail_ci_if_error: false
+```
 
 ##### Pattern B: App Running Locally via Podman/Docker (HTTP-based collection)
 
 Use when your GitHub Actions workflow starts the instrumented app
 locally (e.g., via `podman run` or `docker compose`) and runs e2e tests
-against it in the same job. The app exposes coverage via HTTP on port
-9095. Use coverport's `--url` flag instead of Kubernetes discovery.
+against it in the same job. The app exposes coverage via HTTP. Use coverport's
+`--url` flag instead of Kubernetes discovery.
+
+**Coverage port**: Instrumentation servers use **53700** by default (Go, Python, Rust).
+Map `-p 53700:53700` when running locally (or match `COVERAGE_PORT` if your image sets it).
+The CLI without `--port` tries 53700 then **9095** as fallback for legacy setups.
+
+**`--url` base path**: Pass the full `/coverage` endpoint URL (e.g. `http://localhost:53700/coverage`).
+The CLI appends `?name=<test-name>` — it does not add `/coverage` for you. A bare
+`http://localhost:53700` returns 404 on Python servers.
+
+##### Pattern B (Go): Local HTTP collection
 
 ```yaml
 - name: Start instrumented application
   run: |
     podman run -d --name app-under-test \
-      -p 8080:8080 -p 9095:9095 \
+      -p 8080:8080 -p 53700:53700 \
       ${{ env.INSTRUMENTED_IMAGE }}
 
 - name: Run e2e tests
@@ -567,9 +868,9 @@ against it in the same job. The app exposes coverage via HTTP on port
     podman run --rm \
       --network host \
       -v $PWD/coverage-output:/workspace/coverage-output \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       collect \
-        --url http://localhost:9095 \
+        --url http://localhost:53700/coverage \
         --test-name="e2e-tests" \
         --output=/workspace/coverage-output
 
@@ -577,7 +878,7 @@ against it in the same job. The app exposes coverage via HTTP on port
     podman run --rm \
       -v $PWD/coverage-output:/workspace/coverage-output:ro \
       -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       process \
         --coverage-dir=/workspace/coverage-output \
         --repo-url=${{ github.server_url }}/${{ github.repository }} \
@@ -589,12 +890,117 @@ against it in the same job. The app exposes coverage via HTTP on port
   run: podman stop app-under-test || true
 ```
 
-**Key points for `--url` collection:**
-- `--network host` is required so coverport can reach localhost:9095
+**Key points for Go `--url` collection:**
+- `--network host` is required so coverport can reach localhost:53700
+- `--url` must include `/coverage` (e.g. `http://localhost:53700/coverage`)
+- Coverport detects format from the `/coverage` response body (not `/health`)
 - When using `--url` (no container image), you must pass `--repo-url`
   and `--commit-sha` to the `process` command explicitly
-- The coverport CLI uses these to clone the repo and remap coverage
+- Legacy Go images may listen on 9095 — use `--url http://localhost:9095/coverage` and map that port
+- The coverport CLI uses repo URL/commit to clone the repo and remap coverage
   paths from container paths to source paths
+
+##### Pattern B (Python): Local HTTP collection
+
+> **Prefer Pattern A (Kind/K8s) for Python container apps in GitHub Actions.** K8s `collect`
+> checks `/health`, triggers `/coverage/save` when needed, fetches `/coverage`, and generates
+> `coverage.xml` inside the pod automatically. Pattern B (`--url`) only saves serialized
+> `CoverageData.dumps()` bytes as `.coverage` — the coverport-cli image has no Python, so XML
+> must be generated on the **GHA runner** after collect using the conversion script below.
+
+Use after completing Steps 3-5 (Python). Only when the app runs via `podman run` in the same
+job (not deployed to Kind).
+
+```yaml
+- name: Start instrumented application
+  run: |
+    podman run -d --name app-under-test \
+      -p 8080:8080 -p 53700:53700 \
+      ${{ env.INSTRUMENTED_IMAGE }}
+
+- name: Run e2e tests
+  run: |
+    <your-e2e-test-command>
+
+- name: Collect e2e coverage
+  if: always()
+  run: |
+    mkdir -p coverage-output && chmod 777 coverage-output
+    COVERAGE_PORT=53700
+    # --url collect does NOT call /coverage/save (unlike K8s collect)
+    curl -sf "http://localhost:${COVERAGE_PORT}/coverage/save" || true
+    podman run --rm \
+      --network host \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
+      collect \
+        --url "http://localhost:${COVERAGE_PORT}/coverage" \
+        --test-name="e2e-tests" \
+        --output=/workspace/coverage-output
+
+- name: Generate Cobertura XML
+  if: always()
+  run: |
+    pip install coverage
+    python3 <<'PY'
+    import os
+    import coverage
+
+    repo = os.path.abspath(".")
+    # Must match container WORKDIR and .coveragerc `source` (default /app/)
+    container_prefix = "/app/"
+    raw_path = "coverage-output/e2e-tests/.coverage"
+    xml_path = "coverage-output/e2e-tests/coverage.xml"
+    sqlite_path = "coverage-output/e2e-tests/.coverage.local"
+
+    raw = open(raw_path, "rb").read()
+    data = coverage.CoverageData(no_disk=True)
+    data.loads(raw)
+
+    remapped = coverage.CoverageData(no_disk=True)
+    for fn in data.measured_files():
+        local_fn = fn.replace(container_prefix, repo + "/")
+        lines = data.lines(fn)
+        if lines:
+            remapped.add_lines({local_fn: lines})
+        arcs = data.arcs(fn)
+        if arcs:
+            remapped.add_arcs({local_fn: arcs})
+
+    db = coverage.CoverageData(basename=sqlite_path)
+    db.update(remapped)
+    db.write()
+
+    cov = coverage.Coverage(data_file=sqlite_path)
+    cov.load()
+    cov.xml_report(outfile=xml_path)
+    print(f"Wrote {xml_path}")
+    PY
+
+- name: Upload e2e coverage to Codecov
+  if: always()
+  uses: codecov/codecov-action@v6
+  with:
+    use_oidc: true
+    flags: e2e-tests
+    files: coverage-output/e2e-tests/coverage.xml
+    fail_ci_if_error: false
+
+- name: Stop application
+  if: always()
+  run: podman stop app-under-test || true
+```
+
+**Key points for Python `--url` collection:**
+- `--network host` is required so coverport can reach localhost
+- `--url` must be `http://localhost:<port>/coverage` (CLI appends `?name=`; bare host:port → 404)
+- Map the same port in `podman run` (`-p`) and `COVERAGE_PORT` if your image overrides the default
+- `collect --url` saves `coverage-output/<test-name>/.coverage` only — **serialized** `CoverageData.dumps()` bytes, not SQLite
+- Unlike K8s collect, `--url` does **not** call `/coverage/save` — run `curl .../coverage/save` first if needed
+- Generate XML on the GHA runner with the Python conversion script above (not `coverage xml --data-file=` on the raw file)
+- `[paths]` in `.coveragerc` alone does not fix host-side XML — set `container_prefix` in the conversion script to match WORKDIR (default `/app/`)
+- Do not use `coverport process --format=python` on `--url` output until the CLI handles serialized data
+- Smoke-test before collect: `curl http://localhost:<port>/health` (expect `coverage_enabled: true`)
 
 ##### Pattern C: Client-Side / Test Runner-Based Coverage Collection
 
@@ -623,7 +1029,7 @@ coverage output directory into the coverport container for processing.
       -v $PWD/e2e-tests/.nyc_output:/workspace/coverage:ro \
       -v $PWD/coverport-output:/workspace/output:rw \
       -e CODECOV_TOKEN="${{ secrets.CODECOV_TOKEN }}" \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       process \
         --coverage-dir=/workspace/coverage \
         --format=nyc \
@@ -638,6 +1044,86 @@ coverage output directory into the coverport container for processing.
 - Coverage files are from the test runner output directory, not HTTP
 - No `collect` step is needed — go straight to `process`
 
+##### Pattern D (Rust): App Running Locally via Podman/Docker
+
+Rust coverage requires an additional binary extraction step because
+`llvm-cov` needs the original instrumented binary to produce LCOV output
+from the collected `.profraw` data.
+
+```yaml
+- name: Set up Rust toolchain
+  uses: dtolnay/rust-toolchain@stable
+  with:
+    components: llvm-tools-preview
+
+- name: Add llvm-tools to PATH
+  run: |
+    TOOLCHAIN_LIB=$(rustc --print sysroot)/lib
+    echo "$(find $TOOLCHAIN_LIB -name 'llvm-profdata' -exec dirname {} \;)" >> $GITHUB_PATH
+
+- name: Build instrumented image
+  run: |
+    podman build --build-arg ENABLE_COVERAGE=true -t myapp:instrumented .
+
+- name: Extract binary from image
+  run: |
+    CONTAINER_ID=$(podman create myapp:instrumented)
+    podman cp $CONTAINER_ID:/app/<binary-name> ./coverage-binary
+    podman rm $CONTAINER_ID
+    chmod +x ./coverage-binary
+
+- name: Start instrumented application
+  run: |
+    podman run -d --name app-under-test \
+      -p 8080:8080 -p 53700:53700 \
+      myapp:instrumented
+
+- name: Run e2e tests
+  run: |
+    <your-e2e-test-command>
+
+- name: Collect and upload Rust e2e coverage
+  if: always()
+  run: |
+    mkdir -p coverage-output && chmod 777 coverage-output
+
+    # Step 1: Collect profraw from the coverage HTTP endpoint
+    podman run --rm \
+      --network host \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
+      collect \
+        --url http://localhost:53700/coverage \
+        --test-name="e2e-tests" \
+        --output=/workspace/coverage-output
+
+    # Step 2: Process profraw → LCOV and upload to Codecov
+    podman run --rm \
+      -v $PWD/coverage-output:/workspace/coverage-output \
+      -v $PWD/coverage-binary:/workspace/binary:ro \
+      -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
+      -e COVERAGE_BINARY=/workspace/binary \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
+      process \
+        --coverage-dir=/workspace/coverage-output \
+        --format=rust \
+        --repo-url=${{ github.server_url }}/${{ github.repository }} \
+        --commit-sha=${{ github.sha }} \
+        --codecov-flags=e2e-tests
+
+- name: Stop application
+  if: always()
+  run: podman stop app-under-test || true
+```
+
+**Key points for Rust coverage in GitHub Actions:**
+- Port 53700 (not 9095) — Rust uses the coverport standard port
+- `--format=rust` tells coverport to use `llvm-profdata` + `llvm-cov` for processing
+- `COVERAGE_BINARY` environment variable (or `--binary` flag) is required — points to the extracted instrumented binary
+- The binary must match the exact same build that produced the container image
+- `llvm-tools-preview` must be installed so `llvm-profdata` and `llvm-cov` are available
+- Binary extraction via `podman cp` avoids needing to share volumes or rebuild locally
+
 ##### Self-Hosted Codecov with Coverport
 
 When uploading to a self-hosted Codecov instance (see
@@ -647,7 +1133,7 @@ command:
 ```yaml
     podman run --rm \
       -e CODECOV_TOKEN=${{ secrets.CODECOV_TOKEN }} \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       process \
         --codecov-url=<CODECOV_INSTANCE_URL> \
         --coverage-dir=/workspace/coverage-output \
@@ -712,15 +1198,30 @@ Before committing the changes, verify all modifications are correct:
 
 **Local validation (already completed in Step 5.5):**
 - [ ] `podman build` (production) succeeds
-- [ ] `podman build --build-arg ENABLE_COVERAGE=true` (instrumented) succeeds
-- [ ] Instrumented build logs show "Building with coverage instrumentation..."
-- [ ] Production build logs show "Building production binary..."
+- [ ] Go/Rust: `podman build --build-arg ENABLE_COVERAGE=true` (instrumented) succeeds
+- [ ] Python: `podman build --target test` (instrumented) succeeds
+- [ ] Go/Rust instrumented build logs show "Building with coverage instrumentation..."
+- [ ] Python instrumented container logs show `[coverage-wrapper] HTTP server listening on port <port>`
+- [ ] Go production build logs show "Building production binary..."
+- [ ] Python production stage runs plain Gunicorn (no `coverage_server.py` wrapper)
 
 **Go module setup checklist:**
 - [ ] `go.mod` has coverport dependency added (as direct, not indirect)
 - [ ] `go.sum` has coverport checksums
 - [ ] `coverage_init.go` exists at the root of the module with correct build tags
 - [ ] `go mod tidy` produces no diff (dependency is correctly classified)
+
+**Python container instrumentation checklist:**
+- [ ] Four instrumentation files vendored (`coverage_server.py`, `sitecustomize.py`, `.coveragerc`, `gunicorn_coverage.py`)
+- [ ] `sitecustomize.py` installed into site-packages in the instrumented Dockerfile stage
+- [ ] `COVERAGE_PROCESS_START`, `COVERAGE_DATA_DIR=/dev/shm`, and `TMPDIR=/dev/shm` set in instrumented image
+- [ ] CMD uses `coverage_server.py` wrapper with Gunicorn and `gunicorn_coverage.py` config
+- [ ] `.coveragerc` `source` path matches container `WORKDIR`
+- [ ] Coverage HTTP port exposed and mapped (default **53700**, or `COVERAGE_PORT` if set)
+- [ ] Pattern A (Kind): upload `coverage-output/<test-name>/coverage.xml` after collect
+- [ ] Pattern B (`--url`): `--url` uses `http://localhost:<port>/coverage`; host-side deserialize + XML step after collect
+- [ ] Pattern B (`--url`): `curl .../coverage/save` before collect when workers have not flushed data
+- [ ] `curl http://localhost:<port>/health` returns `coverage_enabled: true` (local validation)
 
 **File modifications checklist (Tekton path):**
 - [ ] `Dockerfile` has `ENABLE_COVERAGE` build arg (removed `COVERAGE_SERVER_URL`)
@@ -797,7 +1298,9 @@ After integration is deployed to CI/CD, provide these verification steps to the 
    - Trigger the e2e workflow
    - Verify the coverport `collect` and `process` steps succeed in the logs
    - Check Codecov dashboard for coverage data with `e2e-tests` flag
-   - For `--url` collection: verify the app container was reachable on port 9095
+   - For `--url` collection: verify the app container was reachable on the coverage port and
+     `--url` included `/coverage` (e.g. `http://localhost:53700/coverage`)
+     (9095 only for legacy Go instrumentation)
 
 4. **Check unit test coverage:**
    - Create a PR
@@ -862,7 +1365,7 @@ Common issues and solutions:
 - Verify the coverage collection task can access the cluster where instrumented app runs
 - Review coverage collection task logs for connection or permission errors
 
-**Coverage server not running (port 9095 connection refused) despite instrumented build:**
+**Coverage server not running (connection refused) despite instrumented build:** (Go)
 - **Cause**: The e2e test suite rebuilds the container image without `ENABLE_COVERAGE=true`,
   overwriting the instrumented image with a production build
 - This is common in **kubebuilder/operator-sdk scaffolded projects** where the Ginkgo
@@ -890,9 +1393,9 @@ Common issues and solutions:
 
 **GitHub Actions: coverport collect fails with connection refused:**
 - Ensure `--network host` is set on the `podman run` command so coverport can reach localhost
-- Verify the instrumented app is running and port 9095 is exposed
+- Verify the instrumented app is running and port **53700** is exposed (9095 for legacy Go only)
 - Check `podman logs app-under-test` for startup errors or coverage server messages
-- Try `curl http://localhost:9095/health` before running coverport to confirm the coverage endpoint is available
+- Try `curl http://localhost:53700/health` before running coverport (Python: `coverage_enabled: true`)
 
 **GitHub Actions: coverport process fails with "image is a URL, not a container image":**
 - When using `--url` collection (Pattern B), you must pass `--repo-url` and `--commit-sha` to the `process` command
@@ -920,6 +1423,114 @@ Common issues and solutions:
   - Verify `coverage_init.go` has `//go:build coverage` at the top
   - Ensure production builds do NOT include `-tags=coverage`
   - The coverage code should only be included when `ENABLE_COVERAGE=true`
+
+### Python-Specific Troubleshooting
+
+**Python: `collect --url` returns 404:**
+- **Cause**: `--url` points at the server root (e.g. `http://localhost:9095`) instead of `/coverage`
+- **Solution**: Use `http://localhost:<port>/coverage` — the CLI appends `?name=<test-name>` only
+
+**Python: `coverage.xml` missing after `collect --url`:**
+- **Cause**: `--url` collection saves serialized `CoverageData.dumps()` bytes as `.coverage`, not
+  Cobertura XML or a SQLite database. XML generation via `coverage xml` in-pod runs on the
+  **K8s collect path** only — not for `--url`
+- **Solution**: Prefer **Pattern A (Kind/K8s)** for Python in GHA. For Pattern B (`--url`), run
+  the host-side deserialize + line-remap script after collect (see Pattern B Python). Do not run
+  `coverage xml --data-file=` on the raw collected file — it fails with "file is not a database".
+  Do not use `coverport process --format=python` on `--url` output until the CLI handles serialized data.
+
+**Python: `/coverage` returns empty or "No coverage files found":**
+- **Cause**: Gunicorn workers have not flushed coverage data to `/dev/shm`
+- **Solution**: K8s `collect` checks `/health` and triggers `/coverage/save` automatically when
+  no files exist. **`collect --url` does not** — call `/coverage/save` manually before collect.
+  Verify `gunicorn_coverage.py` is loaded via `-c /opt/gunicorn_coverage.py` and the `worker_exit`
+  hook is present. Manually test: `curl http://localhost:<port>/coverage/save` then `/coverage`
+
+**Python: Coverage files not written (readOnlyRootFilesystem pods):**
+- **Cause**: `TMPDIR` defaults to `/tmp` which may be read-only
+- **Solution**: Set both `COVERAGE_DATA_DIR=/dev/shm` and `TMPDIR=/dev/shm` in the Dockerfile.
+  `.coveragerc` must also set `data_file = /dev/shm/.coverage`
+
+**Python: `sitecustomize` not loading in Gunicorn workers:**
+- **Cause**: `sitecustomize.py` is on `PYTHONPATH` but not in site-packages
+- **Solution**: Copy `sitecustomize.py` into site-packages during the Docker build (see Step 5 Python).
+  Merely setting `PYTHONPATH` is unreliable across Gunicorn worker forks
+
+**Python: Wrong source paths in Codecov report:**
+- **Cause**: `.coveragerc` `source` does not match container `WORKDIR`, or host-side XML used
+  `[paths]` without remapping measured file paths from `/app/...`
+- **Solution**: Set `source = /app` (or your actual `WORKDIR`). For Pattern B host XML, set
+  `container_prefix` in the conversion script to match WORKDIR — `[paths]` alone is not enough
+
+**Python: Port 53700 connection refused:**
+- Verify the instrumented image CMD uses `coverage_server.py` wrapper (not plain Gunicorn)
+- Check container logs for `[coverage-wrapper] HTTP server listening on port 53700`
+- Ensure port 53700 is exposed in Dockerfile and mapped in `podman run` / K8s Service
+- `COVERAGE_PORT` env var overrides the default if set
+
+**Python: Confused with Pattern D (pytest-cov):**
+- Pattern D is for pytest against **cloned source** — no container deploy
+- If e2e tests hit a running container, use Steps 3-5 (Python) + Pattern A/B, not Pattern D
+
+### Rust-Specific Troubleshooting
+
+**Rust: Linker error `undefined symbol: __llvm_profile_get_size_for_buffer`:**
+- **Cause**: Built with `--features coverage` (which includes FFI calls to LLVM profile functions) but without `-C instrument-coverage` (which links the LLVM profile runtime)
+- **Solution**: Always pair `--features coverage` with `RUSTFLAGS="-C instrument-coverage"`. For production builds, omit both.
+
+**Rust: `llvm-profdata` merge fails with "raw profile version mismatch":**
+- **Cause**: The `llvm-profdata` binary is from a different LLVM version than the one used by `rustc` to compile the binary
+- **Solution**: Always use LLVM tools from `rustup component add llvm-tools-preview`. Add to PATH in CI:
+  ```bash
+  LLVM_TOOLS_DIR="$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/host: //p')/bin"
+  echo "$LLVM_TOOLS_DIR" >> $GITHUB_PATH
+  ```
+  Do NOT use system-installed `llvm-profdata` or `llvm-cov`.
+
+**Rust: `llvm-cov` error "failed to load coverage" or "Is a directory":**
+- **Cause**: `COVERAGE_BINARY` path points to a directory or the binary was not extracted from the Docker image
+- **Solution**: Extract the instrumented binary from the image:
+  ```bash
+  docker create --name extract myapp:instrumented
+  docker cp extract:/app/<binary-name> ./instrumented-binary
+  docker rm extract
+  export COVERAGE_BINARY=./instrumented-binary
+  ```
+
+**Rust: "Profile buffer size is 0" from coverage server:**
+- **Cause**: The binary was not compiled with `-C instrument-coverage`
+- **Solution**: Verify the binary was built with both flags: `RUSTFLAGS="-C instrument-coverage" cargo build --release --features coverage`
+
+**Rust: Stray `.profraw` files during build:**
+- **Cause**: `-C instrument-coverage` makes compiler probes emit small profraw files
+- **Solution**: Set `LLVM_PROFILE_FILE=/dev/null` during the build
+
+**Rust: Port 53700 connection refused:**
+- Verify the binary was built with `--features coverage`
+- Check `COVERAGE_PORT` env var in the deployment
+- Ensure the Dockerfile has `EXPOSE 53700` and the container maps the port
+- Check container logs for "Coverage server starting on 0.0.0.0:53700"
+
+**Rust: Docker image Rust version vs CI runner LLVM version mismatch:**
+- **Cause**: The Docker image uses a different Rust/LLVM version than CI. The profraw format is version-specific.
+- **Solution**: Pin the Rust version in Dockerfile (e.g., `FROM rust:1.96.1-bookworm`) and ensure CI uses the same toolchain. The LLVM tools from `llvm-tools-preview` always match the compiler's LLVM version.
+
+### Key Differences: Go vs Rust vs Python Coverage
+
+| Aspect | Go | Rust | Python (container) |
+|---|---|---|---|
+| Instrumentation flag | `-cover -covermode=atomic` | `RUSTFLAGS="-C instrument-coverage"` | `coverage.process_startup()` via sitecustomize |
+| Build tags / features | `//go:build coverage` | `#[cfg(feature = "coverage")]` + `--features coverage` | N/A — file-based, no app code changes |
+| Dependency mechanism | `go get` + blank import in `coverage_init.go` | Cargo optional dep + 2 lines in `main.rs` | Vendor 4 files from `instrumentation/python/` |
+| Coverage data format | Go coverprofile (text) | LLVM profraw (binary) | JSON HTTP response with base64 `CoverageData.dumps()` bytes → Cobertura XML |
+| Processing tools | `go tool covdata` | `llvm-profdata` + `llvm-cov` | K8s: `coverage xml` in pod; `--url`: host deserialize + `xml_report` |
+| Default port | 53700 (CLI fallback: 9095) | 53700 | 53700 (`COVERAGE_PORT` overrides) |
+| coverport format flag | (default) | `--format=rust` | (auto-detected) |
+| Binary extraction | Not needed | Required — `llvm-cov` needs the exact binary | Not needed |
+| Separate `process` step | Often yes (`--url` / OCI) | Yes (`--format=rust`) | K8s collect: no; `--url`: host XML script (not `coverport process` yet) |
+| LLVM tools in CI | Not needed | Must install `llvm-tools-preview` | Not needed |
+| Runtime requirement | None (uses Go's `net/http`) | None (coverage-server brings tokio) | Gunicorn + `coverage` package |
+| Data directory | `GOCOVERDIR` | profraw files | `/dev/shm` (requires `TMPDIR=/dev/shm`) |
 
 ## Pattern D: Python pytest-cov (No Container Instrumentation)
 
@@ -1216,7 +1827,7 @@ build-image:
       -v /tmp/kubeconfig:/kubeconfig:ro \
       -v $PWD/coverage-output:/workspace/coverage-output \
       -e KUBECONFIG=/kubeconfig \
-      quay.io/konflux-ci/konflux-devprod/coverport-cli \
+      quay.io/konflux-ci/konflux-devprod/coverport-cli:${COVERPORT_TAG} \
       collect \
         --namespace=<app-namespace> \
         --label-selector="app=<app-label>" \
@@ -1259,42 +1870,76 @@ source code (clone → install deps → pytest), no container instrumentation ne
 
 **Reference:** `konflux-devlake-mcp` repository.
 
+### Example 5: Python container instrumentation (Flask/Django + Gunicorn)
+
+For a Python web service deployed as a container in Kind or via `podman run` during e2e tests:
+
+**What's changed:**
+- `server/coverage_server.py`, `server/sitecustomize.py`, `server/.coveragerc`,
+  `server/gunicorn_coverage.py` — NEW, vendored from `instrumentation/python/`
+- `Dockerfile` — multi-stage with `test` stage (see Step 5 Python)
+- `.tekton/*-push.yaml` — `build-instrumented-image` with `TARGET_STAGE=test` (if Tekton e2e exists; **not** `ENABLE_COVERAGE=true` — see Step 6 Python)
+- `integration-tests/pipelines/*e2e*.yaml` — instrumented image refs + `collect-and-upload-coverage`
+- `.github/workflows/e2e.yml` — build with `--target test`, **Pattern A (Kind)** preferred for Python
+
+**What's NOT changed:**
+- Application Python source code — no imports or coverage hooks in `app.py`
+- Pattern D — only for pytest against cloned source, not container deploys
+
+**Steps:**
+1. Copy four files from coverport `instrumentation/python/` (Step 3 Python)
+2. Skip Step 4 (no app code changes)
+3. Add instrumented Dockerfile `test` stage (Step 5 Python); build with `--target test`
+4. Collect via **Pattern A (Kind)** — `coverport collect` with namespace/label-selector → `coverage.xml`
+5. Upload `coverage-output/e2e-tests/coverage.xml` via `codecov/codecov-action`
+6. Pattern B (`--url`) only if app runs via local `podman run` — requires host-side deserialize + XML step
+
+**Reference:** [instrumentation/python/README.md](../../../instrumentation/python/README.md)
+
 ## Summary
 
 This skill automates coverport integration by:
 1. Running pre-integration repository scan to understand structure
 2. Analyzing the repository structure in detail
-3. Asking clarifying questions about binaries, secrets, and storage
-4. **Determining where e2e tests run** (Tekton, GitHub Actions, or both) to decide which pipeline changes are needed
-5. **Adding coverport as a Go module dependency** (enables hermetic builds)
-6. **Creating coverage_init.go with build tags** (clean separation)
-7. Modifying the Dockerfile to support coverage builds with build tags
-8. **Validating Dockerfile changes locally with podman/docker builds**
-9. Adding instrumented image build to Tekton push pipeline with hermetic support **(only if Tekton e2e pipeline exists)**
-10. Updating e2e pipeline to use test-metadata v0.4 and instrumented images **(only if Tekton e2e pipeline exists)**
-11. Adding coverage collection task to e2e pipeline (Tekton path) **(only if Tekton e2e pipeline exists)**
-12. Updating PR pipeline to build with coverage instrumentation and hermetic builds **(only if Tekton e2e pipeline exists)**
-13. Updating GitHub Actions to add codecov flags for unit tests
-14. **E2E coverage collection in GitHub Actions** using coverport CLI container via podman:
-    - Pattern A: Kubernetes-based collection (instrumented app in cluster)
-    - Pattern B: Local/podman-based collection with `--url` flag (app in same job)
+3. Asking clarifying questions (binaries, Python test style, secrets, storage)
+4. **Determining where e2e tests run** (Tekton, GitHub Actions, or both) and **Python test style**
+   (container deploy vs pytest against source) to decide which pipeline changes are needed
+5. **Language-specific instrumentation:**
+   - Go: `go get` coverport module + `coverage_init.go` with build tags
+   - Rust: optional Cargo feature + 2 lines in `main()`
+   - Python (container): vendor 4 files from `instrumentation/python/` — no app code changes
+   - Python (source): Pattern D pytest-cov — no container instrumentation
+6. Modifying the Dockerfile to support coverage builds (`ENABLE_COVERAGE` or multi-stage)
+7. **Validating Dockerfile changes locally with podman/docker builds**
+8. Adding instrumented image build to Tekton push pipeline with hermetic support **(only if Tekton e2e pipeline exists)**
+9. Updating e2e pipeline to use test-metadata v0.4 and instrumented images **(only if Tekton e2e pipeline exists)**
+10. Adding coverage collection task to e2e pipeline (Tekton path) **(only if Tekton e2e pipeline exists)**
+11. Updating PR pipeline to build with coverage instrumentation and hermetic builds **(only if Tekton e2e pipeline exists)**
+12. Updating GitHub Actions to add codecov flags for unit tests
+13. **E2E coverage collection in GitHub Actions** using coverport CLI container via podman:
+    - Pattern A: Kubernetes-based collection — upload `coverage.out` (Go) or `coverage.xml` (Python K8s path)
+    - Pattern B (Go): Local `--url` on port 53700 + `process`
+    - Pattern B (Python): Local `--url` — `collect` → serialized `.coverage`, then host deserialize + `xml_report`
     - Pattern C: Client-side collection (test runner output, e.g. Cypress)
-15. Providing comprehensive post-integration validation checklist
-16. Providing documentation for manual secret creation
+    - Pattern D: pytest-cov against source (Python only, no container instrumentation)
+14. Providing comprehensive post-integration validation checklist
+15. Providing documentation for manual secret creation
 
 The integration enables automatic e2e test coverage collection and upload to Codecov with proper flag separation from unit tests.
 
 **Key features:**
 - **Hermetic builds**: Go module approach enables secure, reproducible hermetic builds
-- **No external downloads**: Coverage server is a Go module dependency, not downloaded during build
-- **Build tags**: Clean separation of coverage code using Go build tags
+- **No external downloads (Go)**: Coverage server is a Go module dependency, not downloaded during build
+- **File-based instrumentation (Python container)**: Vendor 4 files from `instrumentation/python/` — no app code changes
+- **Build tags (Go)**: Clean separation of coverage code using Go build tags
 - **GitHub Actions support**: E2e coverage collection using coverport CLI container via podman
-- **Multiple collection patterns**: Kubernetes, local `--url`, client-side test runner, or pytest-cov
+- **Multiple collection patterns**: Kubernetes, local `--url`, client-side test runner, pytest-cov, or Python container HTTP
 - **Pattern D: pytest-cov**: For Python projects where e2e tests run pytest directly against source — no container instrumentation needed, just `--cov` flags and codecov-cli upload
+- **Pattern B (Python)**: For local `podman run` only — `collect --url` saves serialized `.coverage`; generate XML on the GHA runner with the conversion script
 - **Tekton codecov-cli support**: Handles the required `--commit-sha`, `--git-service`, and `--slug` flags that Tekton needs (no CI auto-detection)
 - **Coverage upload on test failure**: Captures test exit code to ensure coverage uploads even when tests fail in Tekton
 - **OIDC auth**: GitHub Actions workflows use OIDC (`use_oidc: true`) instead of token-based auth
 - **Early validation**: Podman/docker builds catch issues before CI/CD changes
 - **Clear checklists**: Pre and post-integration checklists ensure nothing is missed
-- **Enhanced troubleshooting**: Covers common scenarios including GitHub Actions specifics
+- **Enhanced troubleshooting**: Covers Go, Python container, Rust, and GitHub Actions specifics
 - **Smart pipeline selection**: Only modifies Tekton pipelines when a Tekton e2e pipeline exists; skips unnecessary changes for GitHub Actions-only repos

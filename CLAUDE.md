@@ -10,7 +10,7 @@ results as OCI artifacts.
 
 - **CLI**: Go 1.24, Cobra, client-go (k8s), oras-go (OCI)
 - **Instrumentation**: Go 1.21+ (stdlib), Python 3 (coverage.py), Node.js (V8 inspector)
-- **CI**: GitHub Actions (tests/lint), Konflux Tekton (container builds)
+- **CI**: GitHub Actions (unit tests/lint + Kind e2e), Konflux Tekton (container builds)
 - **Container base**: UBI9 minimal + Go 1.24, oras 1.2.0, cosign 2.4.1
 - **Coverage**: Codecov (OIDC upload)
 
@@ -35,7 +35,12 @@ cli/
 instrumentation/
 ├── go/               coverage_server.go — stdlib HTTP server, zero deps
 ├── python/           coverage_server.py — coverage.py wrapper + Gunicorn
-└── nodejs/           coverage_server.js — V8 inspector + v8-to-istanbul
+├── nodejs/           coverage_server.js — V8 inspector + v8-to-istanbul
+└── rust/             coverage-server crate — axum HTTP server, LLVM profraw via FFI
+
+test/
+├── e2e/              Kind-based CLI e2e suite (collect/discover/process + failure paths)
+└── fixtures/         Per-language test apps / images; see test/fixtures/README.md
 ```
 
 ## Build / Test / Run
@@ -53,8 +58,15 @@ make dev-build                # build with -race
 cd cli && go test ./... -v -count=1 -race -coverprofile=coverage.out -covermode=atomic
 cd instrumentation/go && go test ./... -v -count=1 -cover -coverprofile=coverage.out
 
+# E2E (Kind) — also .github/workflows/e2e.yml
+# Needs: kind/kubectl, docker or podman, fixture images loaded into the cluster,
+# Rust 1.80 + llvm-tools-preview (for Rust process), pip install -r test/fixtures/python/requirements.txt
+cd cli && go build -cover -o ./coverport-cover .
+cd test/e2e
+COVERPORT_BIN=$(pwd)/../../cli/coverport-cover go test -v -timeout 25m ./...
+
 # Run locally
-./coverport collect --url http://localhost:53700 --test-name=local --output=./coverage-output
+./coverport collect --url http://localhost:53700/coverage --test-name=local --output=./coverage-output
 ./coverport discover --namespace=my-ns --images=quay.io/org/app:latest
 ./coverport process --input=./coverage-output --codecov-token=$TOKEN
 
@@ -63,12 +75,26 @@ cd cli && make docker-build
 
 ```
 
+## E2E coverage
+
+- **Go / Rust**: Kind pods + HTTP `collect`/`process`. Images:
+  `quay.io/konflux-ci/konflux-devprod/coverport-testapp-{go,rust}`.
+  Rust `process` extracts `/testapp` from the image and sets `COVERAGE_BINARY`.
+- **Node.js**: Pattern C only — `TestProcessNodejsFilesystem` (`process --format=nyc`);
+  no HTTP `collect` (format collides with Python). Uses `coverport-testapp-nodejs`.
+- **Python**: Pattern D (`TestPythonPytestCov` — `pytest --cov` on
+  `test/fixtures/python/`) and container HTTP collection (Patterns A/B) via
+  `instrumentation/python/`; Kind + `collect` for container path, local
+  `collect --url` for Pattern B (see skill + COVERPORT-362 for CLI gaps).
+- Fixture rebuild/push instructions: `test/fixtures/README.md`.
+
 ## Design Choices
 
 - **Separate Go modules**: `cli/` and `instrumentation/go/` are independent modules to allow
   instrumentation to stay on older Go versions (1.21+) while CLI tracks latest.
 - **Zero-dep instrumentation**: Instrumentation servers must remain copy-paste embeddable into
-  any project; no external dependencies allowed.
+  any project; no external dependencies allowed. Exception: Rust requires axum/tokio since
+  the stdlib has no HTTP server.
 - **Port 53700**: Chosen as a high, unlikely-to-conflict port; hardcoded across all languages.
 - **OCI artifacts for coverage**: Coverage data is pushed to container registries (not stored in
   git or ephemeral CI storage) so it persists and is addressable.
@@ -82,8 +108,12 @@ cd cli && make docker-build
   `instrumentation/go/` have `.golangci.yml` configs.
 - `QUICKSTART.md` references `URL_COLLECTION.md` and `MANIFEST_WORKFLOW.md` which don't exist
   in the repo — these are aspirational docs.
-- Python and Node.js instrumentation have NO tests and NO dependency manifests in-repo;
-  they're designed to be copied into consumer projects.
+- Python, Node.js, and Rust instrumentation packages have no unit tests in-repo;
+  they're copy-paste/embed targets. CLI behavior for those languages is covered by
+  `test/e2e` (Kind + pattern-specific fixtures), not by tests under `instrumentation/`.
+- E2E fixture images are `:latest` and rebuilt manually — if instrumentation or
+  fixture app code changes, rebuild/push per `test/fixtures/README.md` or Kind
+  will still run against stale Quay images.
 - Tekton PipelineRuns reference specific Konflux catalog tasks that may change versions
   upstream without notice.
-- No root `.gitignore` — only `cli/.gitignore` exists.
+- Root `.gitignore` covers Go, Rust, Python, Node, and IDE artifacts.

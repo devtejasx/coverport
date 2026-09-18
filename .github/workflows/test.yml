@@ -27,6 +27,9 @@ jobs:
         with:
           go-version: ${{ matrix.go-version }}
 
+      - name: Install coverage.py
+        run: python3 -m pip install coverage==7.6.1
+
       - name: Download dependencies
         working-directory: cli
         run: go mod download
@@ -76,6 +79,21 @@ jobs:
           flags: unit-tests
           files: instrumentation/go/coverage.out
           fail_ci_if_error: false
+
+  test-skill-scripts:
+    name: Skill Script Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.x'
+
+      - name: Run coverage-jira-tasks script tests
+        working-directory: .claude/skills/coverage-jira-tasks/scripts
+        run: python -m unittest discover -p 'test_*.py' -v
 
   check-go-version:
     name: Check Go version consistency

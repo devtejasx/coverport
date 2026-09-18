@@ -24,13 +24,20 @@ ignore:
   - "docs/**"
   - "examples/**"
   - ".github/**"
+  - "test/fixtures/**"
+  - "test/e2e/**"
   - "**/*.yml"
   - "**/*.yaml"
   - "**/*.toml"
   - "**/*.md"
+  - ".agents/**"
+  - ".cursor/**"
+  - "skills/**"
 
 flags:
   unit-tests:
+    carryforward: true
+  e2e-tests:
     carryforward: true
 
 comment:

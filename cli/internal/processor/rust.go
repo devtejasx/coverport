@@ -338,7 +338,7 @@ func detectLCOVSourcePrefix(lines []string) string {
 	prefix := filepath.Dir(paths[0])
 	for _, path := range paths[1:] {
 		dir := filepath.Dir(path)
-		for !strings.HasPrefix(dir, prefix) && prefix != "/" && prefix != "." {
+		for !isWithinDir(dir, prefix) && prefix != "/" && prefix != "." {
 			prefix = filepath.Dir(prefix)
 		}
 	}
@@ -351,6 +351,19 @@ func detectLCOVSourcePrefix(lines []string) string {
 	}
 
 	return ""
+}
+
+// isWithinDir reports whether dir is prefix or a directory below it.
+// A plain strings.HasPrefix is not enough: "/workspace/crate-macros" starts
+// with "/workspace/crate" but is a sibling of it, not a child.
+func isWithinDir(dir, prefix string) bool {
+	if dir == prefix {
+		return true
+	}
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator)
+	}
+	return strings.HasPrefix(dir, prefix)
 }
 
 // generateRustHTMLReport generates an HTML coverage report for Rust

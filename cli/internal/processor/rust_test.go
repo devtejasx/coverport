@@ -171,6 +171,22 @@ func TestDetectLCOVSourcePrefix(t *testing.T) {
 			expected: "/app/src/",
 		},
 		{
+			name: "sibling directory sharing a name prefix is not a child",
+			lines: []string{
+				"SF:/workspace/crate/src/lib.rs",
+				"SF:/workspace/crate-macros/src/lib.rs",
+			},
+			expected: "/workspace/",
+		},
+		{
+			name: "sibling directory sharing a name prefix, listed first",
+			lines: []string{
+				"SF:/app/src-gen/types.rs",
+				"SF:/app/src/main.rs",
+			},
+			expected: "/app/",
+		},
+		{
 			name: "root-level files return empty (prefix would be /)",
 			lines: []string{
 				"SF:/main.rs",

@@ -832,3 +832,14 @@ func TestGenerateLCOVBranchCountsFollowTheirBranch(t *testing.T) {
 		}
 	}
 }
+
+func TestSortedIstanbulKeys(t *testing.T) {
+	// Numeric keys sort by value, not as strings ("2" before "10"); any
+	// non-numeric key falls back to string order after them.
+	m := map[string]int{"b": 0, "10": 0, "a": 0, "2": 0, "0": 0}
+	got := sortedIstanbulKeys(m)
+	want := []string{"0", "2", "10", "a", "b"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("sortedIstanbulKeys = %v, want %v", got, want)
+	}
+}

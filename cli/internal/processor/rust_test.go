@@ -233,6 +233,25 @@ end_of_record`,
 			expectAbsent:   []string{"SF:/workspace/"},
 		},
 		{
+			// Dependency sources leave no common prefix, so the fixed
+			// container prefixes are tried. The build-script output path
+			// contains /build/, which must not count as an SF:/build/ match.
+			name: "ignores a container prefix that only occurs mid-path",
+			lcovContent: `TN:
+SF:/workspace/src/main.rs
+DA:1,5
+end_of_record
+SF:/workspace/target/debug/build/foo-1a2b/out/generated.rs
+DA:1,1
+end_of_record
+SF:/usr/local/cargo/registry/src/index.crates.io-6f17/serde-1.0.0/src/lib.rs
+DA:1,1
+end_of_record`,
+			repoRoot:       "/tmp/repo",
+			expectContains: []string{"SF:src/main.rs", "SF:target/debug/build/foo-1a2b/out/generated.rs"},
+			expectAbsent:   []string{"SF:/workspace/"},
+		},
+		{
 			name: "strips /app/ when files span multiple subdirs",
 			lcovContent: `TN:
 SF:/app/src/main.rs

@@ -296,9 +296,13 @@ func (p *CoverageProcessor) remapRustPaths(lcovFile, repoRoot string) error {
 		prefixes = append([]string{detectedPrefix}, prefixes...)
 	}
 
+	// Match each prefix the way it is stripped, at the start of an SF: path.
+	// A bare substring test also matches a prefix that only occurs inside
+	// another path, such as the /build/ in target/debug/build/<crate>/out/,
+	// which would strip nothing and stop the search before the real prefix.
 	remapped := false
 	for _, prefix := range prefixes {
-		if strings.Contains(content, prefix) {
+		if strings.Contains(content, "SF:"+prefix) {
 			content = strings.ReplaceAll(content, "SF:"+prefix, "SF:")
 			remapped = true
 			fmt.Printf("   Remapped paths: removed prefix %q\n", prefix)
@@ -309,7 +313,7 @@ func (p *CoverageProcessor) remapRustPaths(lcovFile, repoRoot string) error {
 	if !remapped {
 		// Try to make paths relative to repo root
 		absRoot, err := filepath.Abs(repoRoot)
-		if err == nil && strings.Contains(content, absRoot) {
+		if err == nil && strings.Contains(content, "SF:"+absRoot+"/") {
 			content = strings.ReplaceAll(content, "SF:"+absRoot+"/", "SF:")
 			fmt.Printf("   Remapped paths: removed repo root prefix\n")
 		}

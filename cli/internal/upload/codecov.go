@@ -137,10 +137,15 @@ func (u *CodecovUploader) Upload(ctx context.Context, opts CodecovOptions) error
 		return fmt.Errorf("coverage file not found: %w", err)
 	}
 
-	// Build codecov command
+	token := opts.Token
+	if token == "" {
+		token = u.token
+	}
+
+	// Build codecov command. The token goes in the environment rather than
+	// on the command line, where any process on the host could read it.
 	args := []string{
 		"upload-coverage",
-		"-t", opts.Token,
 		"-f", absCoverageFile,
 		"--sha", opts.CommitSHA,
 		"--disable-search", // Don't search for other coverage files
@@ -181,6 +186,7 @@ func (u *CodecovUploader) Upload(ctx context.Context, opts CodecovOptions) error
 	// Execute upload
 	cmd := exec.CommandContext(ctx, u.codecovPath, args...)
 	cmd.Dir = opts.RepoRoot
+	cmd.Env = append(os.Environ(), "CODECOV_TOKEN="+token)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 

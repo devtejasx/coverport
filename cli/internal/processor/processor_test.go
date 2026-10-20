@@ -602,6 +602,13 @@ func TestProcessSerializedPythonCoverage(t *testing.T) {
 			filename:      "util.py",
 			badPrefix:     "/src/",
 		},
+		{
+			name:          "UBI app-root prefix",
+			containerPath: "/opt/app-root/src/pkg/handler.py",
+			repoSubdir:    "pkg",
+			filename:      "handler.py",
+			badPrefix:     "/opt/app-root/",
+		},
 	}
 
 	for _, tt := range tests {

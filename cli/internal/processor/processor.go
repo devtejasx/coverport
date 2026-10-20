@@ -12,7 +12,8 @@ import (
 const sqliteMagic = "SQLite format 3\x00"
 
 // pythonContainerPathPrefixes are common container WORKDIR paths remapped to the local repo root.
-var pythonContainerPathPrefixes = []string{"/app/", "/src/", "/code/", "/workspace/"}
+// "/opt/app-root/src/" is the working directory of the UBI Python images, as in the NYC remap.
+var pythonContainerPathPrefixes = []string{"/opt/app-root/src/", "/app/", "/src/", "/code/", "/workspace/"}
 
 // CoverageFormat represents the type of coverage data
 type CoverageFormat string

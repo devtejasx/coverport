@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -619,36 +620,37 @@ func detectSourcePrefix(lines []string, repoRoot string) string {
 			continue
 		}
 
-		path := line[:colonIdx]
-		if filepath.IsAbs(path) {
-			paths = append(paths, path)
+		paths = append(paths, line[:colonIdx])
+	}
+
+	// For container builds, this is typically /app/, /workspace/, /go/src/..., etc.
+	return commonSourceDir(paths)
+}
+
+// commonSourceDir returns the deepest directory shared by the absolute paths
+// among paths, with a trailing slash, or "" when they share no more than "/".
+// The paths were recorded inside Linux containers, so they are handled as
+// slash-separated paths whatever OS coverport runs on.
+func commonSourceDir(paths []string) string {
+	prefix := ""
+	for _, p := range paths {
+		if !path.IsAbs(p) {
+			continue
+		}
+		dir := path.Dir(p)
+		if prefix == "" {
+			prefix = dir
+			continue
+		}
+		for prefix != "/" && dir != prefix && !strings.HasPrefix(dir, prefix+"/") {
+			prefix = path.Dir(prefix)
 		}
 	}
 
-	if len(paths) == 0 {
+	if prefix == "" || prefix == "/" {
 		return ""
 	}
-
-	// Find the common prefix
-	// For container builds, this is typically /app/, /workspace/, /go/src/..., etc.
-	commonPrefix := filepath.Dir(paths[0])
-	for _, path := range paths[1:] {
-		dir := filepath.Dir(path)
-		// Find common prefix between commonPrefix and dir
-		for !strings.HasPrefix(dir, commonPrefix) && commonPrefix != "/" && commonPrefix != "." {
-			commonPrefix = filepath.Dir(commonPrefix)
-		}
-	}
-
-	// Ensure it ends with a separator
-	if commonPrefix != "" && commonPrefix != "/" && commonPrefix != "." {
-		if !strings.HasSuffix(commonPrefix, string(filepath.Separator)) {
-			commonPrefix += string(filepath.Separator)
-		}
-		return commonPrefix
-	}
-
-	return ""
+	return prefix + "/"
 }
 
 // applyFilters removes coverage data for files matching the filter patterns

@@ -298,7 +298,7 @@ func (p *CoverageProcessor) remapRustPaths(lcovFile, repoRoot string) error {
 
 	remapped := false
 	for _, prefix := range prefixes {
-		if strings.Contains(content, prefix) {
+		if strings.Contains(content, "SF:"+prefix) {
 			content = strings.ReplaceAll(content, "SF:"+prefix, "SF:")
 			remapped = true
 			fmt.Printf("   Remapped paths: removed prefix %q\n", prefix)
@@ -323,34 +323,10 @@ func detectLCOVSourcePrefix(lines []string) string {
 	var paths []string
 	for _, line := range lines {
 		if strings.HasPrefix(line, "SF:") {
-			path := strings.TrimPrefix(line, "SF:")
-			if filepath.IsAbs(path) {
-				paths = append(paths, path)
-			}
+			paths = append(paths, strings.TrimPrefix(line, "SF:"))
 		}
 	}
-
-	if len(paths) == 0 {
-		return ""
-	}
-
-	// Find common directory prefix
-	prefix := filepath.Dir(paths[0])
-	for _, path := range paths[1:] {
-		dir := filepath.Dir(path)
-		for !strings.HasPrefix(dir, prefix) && prefix != "/" && prefix != "." {
-			prefix = filepath.Dir(prefix)
-		}
-	}
-
-	if prefix != "" && prefix != "/" && prefix != "." {
-		if !strings.HasSuffix(prefix, "/") {
-			prefix += "/"
-		}
-		return prefix
-	}
-
-	return ""
+	return commonSourceDir(paths)
 }
 
 // generateRustHTMLReport generates an HTML coverage report for Rust

@@ -207,35 +207,11 @@ func remapNYCPaths(coverageData NYCCoverageData, repoRoot string) int {
 
 // detectNYCSourcePrefix detects the common source path prefix from coverage data
 func detectNYCSourcePrefix(coverageData NYCCoverageData) string {
-	var paths []string
-	for path := range coverageData {
-		if filepath.IsAbs(path) {
-			paths = append(paths, path)
-		}
+	paths := make([]string, 0, len(coverageData))
+	for p := range coverageData {
+		paths = append(paths, p)
 	}
-
-	if len(paths) == 0 {
-		return ""
-	}
-
-	// Find common prefix
-	commonPrefix := filepath.Dir(paths[0])
-	for _, path := range paths[1:] {
-		dir := filepath.Dir(path)
-		for !strings.HasPrefix(dir, commonPrefix) && commonPrefix != "/" && commonPrefix != "." {
-			commonPrefix = filepath.Dir(commonPrefix)
-		}
-	}
-
-	// Ensure it ends with separator
-	if commonPrefix != "" && commonPrefix != "/" && commonPrefix != "." {
-		if !strings.HasSuffix(commonPrefix, string(filepath.Separator)) {
-			commonPrefix += string(filepath.Separator)
-		}
-		return commonPrefix
-	}
-
-	return ""
+	return commonSourceDir(paths)
 }
 
 // writeNYCCoverage writes the coverage data to a JSON file

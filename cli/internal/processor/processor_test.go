@@ -898,3 +898,25 @@ sys.stdout.buffer.write(data.dumps())
 	}
 	return coverageFile
 }
+
+func TestCommonSourceDir(t *testing.T) {
+	tests := []struct {
+		name  string
+		paths []string
+		want  string
+	}{
+		{"shared directory", []string{"/app/pkg/a.go", "/app/cmd/b.go"}, "/app/"},
+		{"sibling with a longer name is not inside", []string{"/app/a.go", "/application/b.go"}, ""},
+		{"directory name prefix of a deeper one", []string{"/src/app/a.go", "/src/application/b.go"}, "/src/"},
+		{"relative paths are ignored", []string{"pkg/a.go", "/workspace/src/b.go"}, "/workspace/src/"},
+		{"only the root in common", []string{"/a/x.go", "/b/y.go"}, ""},
+		{"no absolute paths", []string{"a.go"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := commonSourceDir(tt.paths); got != tt.want {
+				t.Errorf("commonSourceDir(%q) = %q, want %q", tt.paths, got, tt.want)
+			}
+		})
+	}
+}

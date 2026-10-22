@@ -1,6 +1,7 @@
 package metadata
 
 import (
+	"encoding/base64"
 	"testing"
 )
 
@@ -123,6 +124,40 @@ func TestExtractPRNumber(t *testing.T) {
 			result := extractPRNumber(tt.annotations, tt.branch)
 			if result != tt.expected {
 				t.Errorf("extractPRNumber() = %q, want %q", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParsePayload(t *testing.T) {
+	const payloadJSON = `{"predicate":{"buildConfig":{}}}`
+
+	tests := []struct {
+		name    string
+		payload string
+		wantErr bool
+	}{
+		{name: "plain JSON", payload: payloadJSON},
+		{name: "base64-encoded JSON", payload: base64.StdEncoding.EncodeToString([]byte(payloadJSON))},
+		{name: "base64 with trailing newline", payload: base64.StdEncoding.EncodeToString([]byte(payloadJSON)) + "\n"},
+		{name: "neither JSON nor base64", payload: "not a payload!", wantErr: true},
+		{name: "base64 of non-JSON", payload: base64.StdEncoding.EncodeToString([]byte("plain text")), wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload, err := parsePayload(tt.payload)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected an error, got payload %v", payload)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if _, ok := payload["predicate"]; !ok {
+				t.Errorf("predicate missing from %v", payload)
 			}
 		})
 	}

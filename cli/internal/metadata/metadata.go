@@ -2,6 +2,7 @@ package metadata
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os/exec"
@@ -69,19 +70,9 @@ func (e *ImageMetadataExtractor) ExtractGitMetadata(ctx context.Context, image s
 		return nil, fmt.Errorf("attestation payload not found or invalid")
 	}
 
-	// Parse the payload
-	var payload map[string]interface{}
-	if err := json.Unmarshal([]byte(payloadStr), &payload); err != nil {
-		// Try base64 decoding first
-		cmd := exec.Command("base64", "-d")
-		cmd.Stdin = strings.NewReader(payloadStr)
-		decoded, err := cmd.Output()
-		if err != nil {
-			return nil, fmt.Errorf("failed to decode payload: %w", err)
-		}
-		if err := json.Unmarshal(decoded, &payload); err != nil {
-			return nil, fmt.Errorf("failed to parse decoded payload: %w", err)
-		}
+	payload, err := parsePayload(payloadStr)
+	if err != nil {
+		return nil, err
 	}
 
 	// Navigate to the annotations in the Konflux attestation structure
@@ -163,6 +154,24 @@ func (e *ImageMetadataExtractor) ExtractGitMetadata(ctx context.Context, image s
 	}
 
 	return metadata, nil
+}
+
+// parsePayload decodes an attestation payload, which is either plain JSON or
+// base64-encoded JSON (the DSSE envelope format cosign returns).
+func parsePayload(payloadStr string) (map[string]interface{}, error) {
+	var payload map[string]interface{}
+	if err := json.Unmarshal([]byte(payloadStr), &payload); err == nil {
+		return payload, nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payloadStr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode payload: %w", err)
+	}
+	if err := json.Unmarshal(decoded, &payload); err != nil {
+		return nil, fmt.Errorf("failed to parse decoded payload: %w", err)
+	}
+	return payload, nil
 }
 
 // extractPRNumber attempts to extract the PR number from annotations or branch name
